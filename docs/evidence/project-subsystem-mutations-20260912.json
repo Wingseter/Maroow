@@ -1,0 +1,50 @@
+{
+  "mutations": [
+    {
+      "mutation": "unknown_root_loss",
+      "file": "src/editor/project_serialize.cpp",
+      "build_exit_code": 0,
+      "test_exit_code": 1,
+      "expected_failure": "missing JSON member: future_root",
+      "rejected": true,
+      "test_output": "PASS parse_without_assets\nPASS parse_failure_is_atomic_and_diagnostic\nFAIL unknown_fields_and_determinism: missing JSON member: future_root\nPASS overlay_order_and_input_immutability\nPASS runtime_excludes_authoring_intent\nPASS player_save_reopen_export\nPASS parameter_save_reopen_export\n6/7 project subsystem cases passed\n"
+    },
+    {
+      "mutation": "constraint_order_reversal",
+      "file": "src/editor/project_runtime.cpp",
+      "build_exit_code": 0,
+      "test_exit_code": 1,
+      "expected_failure": "constraint upsert must run after lifecycle rename",
+      "rejected": true,
+      "test_output": "PASS parse_without_assets\nPASS parse_failure_is_atomic_and_diagnostic\nPASS unknown_fields_and_determinism\nFAIL overlay_order_and_input_immutability: constraint upsert must run after lifecycle rename\nPASS runtime_excludes_authoring_intent\nPASS player_save_reopen_export\nPASS parameter_save_reopen_export\n6/7 project subsystem cases passed\n"
+    },
+    {
+      "mutation": "partial_parse_commit",
+      "file": "src/editor/project_parse.cpp",
+      "build_exit_code": 0,
+      "test_exit_code": 1,
+      "expected_failure": "failed parse partially overwrote its output",
+      "rejected": true,
+      "test_output": "PASS parse_without_assets\nFAIL parse_failure_is_atomic_and_diagnostic: failed parse partially overwrote its output\nPASS unknown_fields_and_determinism\nPASS overlay_order_and_input_immutability\nPASS runtime_excludes_authoring_intent\nPASS player_save_reopen_export\nPASS parameter_save_reopen_export\n6/7 project subsystem cases passed\n"
+    },
+    {
+      "mutation": "save_as_without_rebase",
+      "file": "src/editor/project_io.cpp",
+      "build_exit_code": 0,
+      "test_exit_code": 1,
+      "expected_failure": "Save As changed runtime asset identity",
+      "rejected": true,
+      "test_output": "PASS parse_without_assets\nPASS parse_failure_is_atomic_and_diagnostic\nPASS unknown_fields_and_determinism\nPASS overlay_order_and_input_immutability\nPASS runtime_excludes_authoring_intent\nFAIL player_save_reopen_export: Save As changed runtime asset identity\nFAIL parameter_save_reopen_export: Save As changed runtime asset identity\n5/7 project subsystem cases passed\n"
+    }
+  ],
+  "all_original_source_hashes_restored": true,
+  "restored_sha256": {
+    "project_serialize.cpp": "b2e01d245673b85d4093bed8707f577a4600fa69cab71f63a396d7e3899a5065",
+    "project_runtime.cpp": "fb77cc579f92ff1b2b60a95fc4628f369c0f69cac918ecbd0f7f058b861ecee9",
+    "project_parse.cpp": "87c9d3f68f47ed045c5c441ff6a511451f94a5398ea06abc6528a7abf39f14e3",
+    "project_io.cpp": "12d9f58f8545f9ff6ee5af2aa37a42b87288175bea834e70eb11278ccac38a56"
+  },
+  "restored_build_exit_code": 0,
+  "restored_test_exit_code": 0,
+  "restored_test_output": "PASS parse_without_assets\nPASS parse_failure_is_atomic_and_diagnostic\nPASS unknown_fields_and_determinism\nPASS overlay_order_and_input_immutability\nPASS runtime_excludes_authoring_intent\nPASS player_save_reopen_export\nPASS parameter_save_reopen_export\n7/7 project subsystem cases passed\n"
+}

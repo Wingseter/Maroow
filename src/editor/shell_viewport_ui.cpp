@@ -120,9 +120,9 @@ void draw_rotation_gizmo(
                   : IM_COL32(151, 166, 190, 225);
     draw_list->AddCircle(center, kRotationGizmoRadius, ring_color, 64, 2.25f);
 
-    if (*bone_index < state.preview_skeleton->bone_world_transforms().size()) {
+    if (*bone_index < state.preview_skeleton()->bone_world_transforms().size()) {
         const auto world =
-            state.preview_skeleton->bone_world_transforms()[*bone_index];
+            state.preview_skeleton()->bone_world_transforms()[*bone_index];
         double axis_x = world.a;
         double axis_y = -world.c;
         const double length = std::hypot(axis_x, axis_y);
@@ -1070,6 +1070,8 @@ void draw_viewport_window(ShellState* state) {
     const bool weight_mode_ready =
         state->weight_paint.mode == WeightPaintMode::Smooth ||
         weight_selection.influence_bone_index.has_value();
+    // Replace joins Paint and Erase in needing an active influence bone; only
+    // Smooth does not.
     const bool weight_tool_ready =
         state->weight_paint.enabled &&
         paint_target.has_value() &&
@@ -1079,7 +1081,7 @@ void draw_viewport_window(ShellState* state) {
                                                : "Animation preview / " + state->selected_animation_name;
 
     // ── Viewport Toolbar ──
-    if (state->load_result && state->preview_skeleton) {
+    if (state->load_result && state->preview_skeleton()) {
         const ImVec2 pre_toolbar_avail = ImGui::GetContentRegionAvail();
         if (!state->viewport_transform_gesture.has_value() &&
             !state->viewport_ffd_gesture.has_value() &&
@@ -1216,10 +1218,10 @@ void draw_viewport_window(ShellState* state) {
         state->viewport_box_selection.reset();
     }
     std::optional<marrow::renderer::PreparedScene> frame_scene;
-    if (use_framebuffer && layout.has_value() && state->preview_skeleton != nullptr &&
+    if (use_framebuffer && layout.has_value() && state->preview_skeleton() != nullptr &&
         !state->load_result.atlas_data.empty()) {
         auto scene_result = marrow::renderer::prepare_setup_pose_scene(
-            *state->preview_skeleton, *state->load_result.atlas_data.front());
+            *state->preview_skeleton(), *state->load_result.atlas_data.front());
         if (scene_result) {
             frame_scene = std::move(*scene_result.scene);
         } else {
@@ -1907,6 +1909,15 @@ void draw_viewport_settings(ShellState* state) {
         if (icon_button(state->icons, Icon::WeightSmooth, "Smooth weights", mode_smooth)) {
             state->weight_paint.mode = WeightPaintMode::Smooth;
         }
+        ImGui::SameLine(0.0f, 4.0f);
+        const bool mode_replace = state->weight_paint.mode == WeightPaintMode::Replace;
+        if (icon_button(
+                state->icons,
+                Icon::WeightBrush,
+                "Replace weights (assign the stamp value)",
+                mode_replace)) {
+            state->weight_paint.mode = WeightPaintMode::Replace;
+        }
 
         ImGui::SliderFloat(
             "Radius##weight_paint", &state->weight_paint.radius_pixels,
@@ -1915,6 +1926,110 @@ void draw_viewport_settings(ShellState* state) {
             "Strength##weight_paint", &state->weight_paint.strength,
             0.05f, 1.0f, "%.2f");
         ImGui::Checkbox("Show Heat Map##weight_paint", &state->weight_paint.show_heatmap);
+
+        // MAR-175: selected-scope Normalize and setup-pose Rebind. Both act on
+        // the FFD vertex selection when it resolves against this attachment and
+        // on every vertex otherwise, which is the shipped agent behaviour.
+        ImGui::BeginDisabled(!paint_target.has_value());
+        {
+            const std::vector<std::size_t> scope = weight_command_scope(*state);
+            if (ImGui::Button("Normalize##weight_paint")) {
+                normalize_weights_command(state);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Rebind##weight_paint")) {
+                rebind_weights_command(state);
+            }
+            ImGui::SameLine();
+            // MAR-176: automatic generation from an EXPLICIT candidate set.
+            // Disabled with the reason shown when nothing is checked -- an empty
+            // checklist must never fall back to the whole skeleton.
+            ImGui::BeginDisabled(state->weight_paint.candidate_bone_names.empty());
+            if (ImGui::Button("Generate##weight_paint")) {
+                generate_weights_command(state);
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (scope.empty()) {
+                ImGui::TextDisabled("scope: every vertex");
+            } else {
+                ImGui::TextDisabled("scope: %zu selected", scope.size());
+            }
+            if (state->weight_paint.candidate_bone_names.empty()) {
+                ImGui::TextDisabled("Generate needs at least one candidate bone.");
+            }
+
+            // The candidate checklist, in SKELETON order -- the same order the
+            // hierarchy panel shows and the same order the generator's distance
+            // tie-break uses.
+            const auto& bones = state->load_result.skeleton_data->bones();
+            std::vector<std::string>& candidates = state->weight_paint.candidate_bone_names;
+            const auto is_checked = [&](const std::string& name) {
+                return std::find(candidates.begin(), candidates.end(), name) != candidates.end();
+            };
+            if (ImGui::Button("All##weight_candidates")) {
+                candidates.clear();
+                for (const auto& bone : bones) {
+                    candidates.push_back(bone.name);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("None##weight_candidates")) {
+                candidates.clear();
+            }
+            ImGui::SameLine();
+            // A ONE-SHOT fill, not a live binding: binding the candidate set to
+            // the transient bone selection would make the same click produce
+            // different weights depending on what was selected a moment ago.
+            if (ImGui::Button("From selection##weight_candidates")) {
+                candidates.clear();
+                // Walked in skeleton order rather than selection order, so the
+                // checklist reads the same way however the bones were clicked.
+                for (const auto& bone : bones) {
+                    for (const auto& item : state->selection.items()) {
+                        const auto* selected = std::get_if<BoneSelection>(&item);
+                        if (selected != nullptr && selected->bone_name == bone.name) {
+                            candidates.push_back(bone.name);
+                            break;
+                        }
+                    }
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("candidates: %zu", candidates.size());
+            if (ImGui::BeginChild(
+                    "##weight_candidate_bones", ImVec2(0.0f, 120.0f), true)) {
+                for (std::size_t index = 0; index < bones.size(); ++index) {
+                    const std::string& name = bones[index].name;
+                    bool checked = is_checked(name);
+                    if (ImGui::Checkbox(
+                            (name + "##weight_candidate_" + std::to_string(index)).c_str(),
+                            &checked)) {
+                        if (checked) {
+                            if (!is_checked(name)) {
+                                candidates.push_back(name);
+                            }
+                        } else {
+                            candidates.erase(
+                                std::remove(candidates.begin(), candidates.end(), name),
+                                candidates.end());
+                        }
+                    }
+                }
+                // A checked name that no longer resolves is SHOWN rather than
+                // dropped, so a rig edit cannot silently shrink the candidate
+                // set behind the user's back. Generate rejects while one is
+                // present.
+                for (const std::string& name : candidates) {
+                    if (state->load_result.skeleton_data->find_bone_index(name).has_value()) {
+                        continue;
+                    }
+                    ImGui::TextDisabled("%s (no longer in the skeleton)", name.c_str());
+                }
+            }
+            ImGui::EndChild();
+        }
+        ImGui::EndDisabled();
 
         if (paint_target.has_value()) {
             ImGui::Text("Preview mesh: %s", paint_target->display_attachment_name.c_str());

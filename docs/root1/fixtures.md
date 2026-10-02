@@ -96,6 +96,12 @@ python3 -m json.tool assets/fixtures/parameter_expression_lipsync.mskl > /dev/nu
   Shear; body Slot Color; and the valid overlaid arm_l Rotate track. Together
   they cover Linear, Stepped, and Cubic outgoing easing. Inherit, Attachment,
   FFD, Draw Order, and Event rows remain explicit graph exclusions.
+- MAR-168 edits those same rows: spine Rotate supplies the Angle lane, spine
+  Translate, Scale, and Shear supply the X/Y lanes including a unit scale key a
+  drag can drive to exactly zero, and body Slot Color supplies the R/G/B/A
+  lanes whose alpha keys at `1.0` and `0.5` exercise the group-wide `[0, 1]`
+  clamp. `transform_source` keeps a nonzero setup rotation so the project smoke
+  can prove a Rotate delta applies with no setup-pose conversion.
 - The `body` slot now carries the MAR-017 presentation defaults:
   - `blend: "screen"` exercises a non-default slot blend mode in the renderer validation path.
   - `color: "ffcc99ff"` and `dark: "336699ff"` provide the setup-pose light/dark tint pair used by two-color tint validation.

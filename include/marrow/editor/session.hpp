@@ -155,6 +155,27 @@ public:
     EditorSession& operator=(const EditorSession&) = delete;
 
     /**
+     * @brief Builds a new in-memory project around an existing rig and adopts it.
+     *
+     * Writes nothing: the session becomes dirty immediately, so the caller must
+     * save before the project exists on disk. The referenced skeleton and atlases
+     * must already exist and load -- this adopts an existing rig and never authors
+     * one. A failure leaves any current session entirely unchanged.
+     *
+     * @return The attempted load result, carrying the load error on failure.
+     */
+    ProjectLoadResult create(const MinimalProjectOptions& options);
+    /**
+     * @brief Discards the session's project, runtime, preview and history.
+     *
+     * Bumps all three revisions rather than resetting them, so an observer
+     * comparing a cached revision cannot mistake a closed session for an
+     * unchanged one. The session stays reusable: a later `open` succeeds.
+     *
+     * @return `false` when an edit transaction is active; the session is then unchanged.
+     */
+    bool close();
+    /**
      * @brief Opens a project and replaces the session atomically on success.
      * @return The attempted load result. A failed open leaves current state unchanged.
      */
@@ -165,7 +186,29 @@ public:
      */
     ProjectLoadResult reload();
     /**
+     * @brief Reloads the project's runtime sources from disk and swaps them atomically.
+     *
+     * Loads the skeleton document and every atlas, rebuilds runtime data and
+     * rebinds the preview entirely into locals; the session is mutated only after
+     * all of them have succeeded. A failure leaves the session unchanged --
+     * including the invariant that `runtime_data()` is derived from
+     * `base_skeleton_document()`, which a swap-then-roll-back can violate without
+     * any return code revealing it.
+     *
+     * Bumps the runtime and preview revisions on success. The authored project is
+     * untouched, so `project_revision()` does not move and history stays valid.
+     *
+     * @return Failure when no project is open, an edit transaction is active, a
+     *         source fails to load, the runtime fails to build, or the preview
+     *         fails to rebind.
+     */
+    SessionResult adopt_runtime_sources();
+    /**
      * @brief Saves the project, using its source path when `path` is empty.
+     *
+     * Writes through a temporary file and an atomic rename, and rebases every
+     * project-relative reference so a Save As into another directory produces a
+     * project that still opens. See `rebase_project_paths`.
      */
     ProjectSaveResult save(const std::filesystem::path& path = {});
     /**
@@ -305,6 +348,54 @@ public:
     std::size_t redo_count() const noexcept;
     std::string_view undo_label() const noexcept;
     std::string_view redo_label() const noexcept;
+    /**
+     * @brief Reverts the most recent edit WITHOUT making it redoable.
+     *
+     * `undo()` is the user's action and is redoable by definition: it pops the
+     * entry, applies it, and pushes it onto the redo stack. That is right for a
+     * person stepping back and wrong for an internal rollback, whose meaning is
+     * *"this never happened"* rather than *"the user stepped back one"*. A
+     * rollback that calls `undo()` leaves the reverted transaction sitting on the
+     * redo stack, so the next Redo re-applies half of an operation that failed --
+     * measured in MAR-190, where a commit failure after `UpdateProvenance` left
+     * the files rolled back and the provenance edit armed for replay.
+     *
+     * Discards ONLY the entry it reverts. The user's existing redo stack is left
+     * exactly as it was: `clear_history()` is the wrong tool here because it
+     * destroys both stacks, which would trade one history defect for a worse one.
+     *
+     * `project_revision()` still advances, deliberately -- it counts CHANGES to
+     * the project in either direction and is a change detector, not a state
+     * identifier, so it is monotonic by design.
+     *
+     * @return Failure when a transaction is active or there is nothing to revert.
+     */
+    SessionResult revert_last_edit();
+
+    /**
+     * @brief Sets the redo stack aside so a SPECULATIVE edit can give it back.
+     *
+     * Committing any edit clears the redo stack -- correct and universal, because
+     * a new edit invalidates the branch the user could have redone into. But an
+     * edit that is about to be rolled back is not a new branch: if it fails, the
+     * user must be left exactly where they were, and `revert_last_edit()` alone
+     * cannot restore what `commit` already discarded.
+     *
+     * So the pair is: stash before the speculative edit, `restore_stashed_redo()`
+     * if it is rolled back, `drop_redo_stash()` if it stands. Without the stash a
+     * failed reimport silently destroyed a redo stack the user built before they
+     * ever opened it -- MAR-190's V9 measures exactly that.
+     *
+     * One slot, and the session is single-writer, so these do not nest. A second
+     * stash before a restore overwrites the first; both are no-ops during an
+     * active transaction, matching `clear_history()`.
+     */
+    void stash_redo_stack() noexcept;
+    /** @brief Puts a stashed redo stack back, replacing the current one. */
+    void restore_stashed_redo() noexcept;
+    /** @brief Discards a stashed redo stack; the speculative edit stands. */
+    void drop_redo_stash() noexcept;
+
     void clear_history() noexcept;
 
     bool dirty() const noexcept;

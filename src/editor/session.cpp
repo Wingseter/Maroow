@@ -1149,6 +1149,8 @@ struct EditorSession::Impl {
     PreviewController preview;
     std::vector<HistoryEntry> undo_entries;
     std::vector<HistoryEntry> redo_entries;
+    /// @brief A redo stack set aside across a speculative edit. One slot.
+    std::vector<HistoryEntry> stashed_redo;
     std::optional<ActiveTransaction> active_transaction;
     std::uint64_t next_transaction_id{1U};
     std::string saved_serialized_project;
@@ -1324,6 +1326,20 @@ struct EditorSession::Impl {
                     extension_result.error)};
         }
 
+        // MAR-172: the one position provably after every duration change,
+        // including the growth the session just performed on the caller's
+        // behalf. A controller-level wiring would run before that growth and
+        // leave every managed boundary key of the animation stale.
+        const TimelineLoopSyncResult loop_sync_result =
+            synchronize_loop_boundaries(load.project.get(), *load.skeleton_data);
+        if (!loop_sync_result) {
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    loop_sync_result.error)};
+        }
+
         const ProjectRuntimeResult runtime_result = build_project_runtime(
             *load.project,
             *load.base_skeleton_document);
@@ -1421,6 +1437,21 @@ struct EditorSession::Impl {
                     extension_result.error)};
         }
         if (extension_result.changed) {
+            transaction.runtime_is_current = false;
+            active_transaction->runtime_is_current = false;
+        }
+        // MAR-172, mirroring the auto-extend rollback and invalidation exactly.
+        const TimelineLoopSyncResult loop_sync_result =
+            synchronize_loop_boundaries(load.project.get(), *load.skeleton_data);
+        if (!loop_sync_result) {
+            restore_active_transaction();
+            return SessionResult{
+                false,
+                make_error(
+                    SessionErrorCode::InvalidTransaction,
+                    loop_sync_result.error)};
+        }
+        if (loop_sync_result.changed) {
             transaction.runtime_is_current = false;
             active_transaction->runtime_is_current = false;
         }
@@ -1659,6 +1690,113 @@ EditorSession::~EditorSession() = default;
 EditorSession::EditorSession(EditorSession&&) noexcept = default;
 EditorSession& EditorSession::operator=(EditorSession&&) noexcept = default;
 
+ProjectLoadResult EditorSession::create(const MinimalProjectOptions& options) {
+    if (impl_->active_transaction.has_value()) {
+        ProjectLoadResult result;
+        result.error = make_session_load_error(
+            options.project_path,
+            "cannot create a project while an edit transaction is active");
+        return result;
+    }
+
+    // create_minimal_project already relativizes the skeleton and atlas paths
+    // against options.project_path through make_project_relative_path, so a
+    // created project inherits the Save As rebasing rule and needs none of its own.
+    ProjectData project = create_minimal_project(options);
+
+    // Run the same materialization load_project runs. This is also what enforces
+    // "adopts an existing rig, never authors one": create cannot succeed without
+    // a loadable `.mskl` and at least one loadable atlas. Everything lands in
+    // locals, so a failure touches no current session (F14).
+    ProjectLoadResult attempted;
+    auto project_ptr = std::make_shared<ProjectData>(std::move(project));
+    const runtime::json::LoadResult document_result =
+        runtime::load_skeleton_document(project_ptr->resolved_skeleton_path());
+    if (!document_result) {
+        attempted.error = document_result.error;
+        return attempted;
+    }
+    attempted.base_skeleton_document =
+        marrow::allocate_shared<runtime::json::Document>(std::move(*document_result.document));
+
+    const ProjectRuntimeResult runtime_result =
+        build_project_runtime(*project_ptr, *attempted.base_skeleton_document);
+    if (!runtime_result) {
+        ProjectLoadResult failure;
+        failure.error = runtime_result.error;
+        return failure;
+    }
+
+    std::vector<std::shared_ptr<const runtime::AtlasData>> atlas_data;
+    for (const std::filesystem::path& atlas_path : project_ptr->resolved_atlas_paths()) {
+        const auto atlas_result = runtime::AtlasLoader::load(atlas_path);
+        if (!atlas_result) {
+            ProjectLoadResult failure;
+            failure.error = atlas_result.error;
+            return failure;
+        }
+        atlas_data.push_back(atlas_result.atlas_data);
+    }
+    attempted.project = std::move(project_ptr);
+    attempted.skeleton_data = runtime_result.skeleton_data;
+    attempted.atlas_data = std::move(atlas_data);
+
+    PreviewState initial;
+    initial.animation_name = attempted.project->editor_metadata.active_animation;
+    initial.skin_names = attempted.project->editor_metadata.preview_skins;
+    initial.slot_overrides.resize(attempted.skeleton_data->slots().size());
+    PreviewController next_preview;
+    std::string preview_error;
+    if (!next_preview.bind(attempted.skeleton_data, std::move(initial), false, &preview_error)) {
+        ProjectLoadResult failure;
+        failure.error = make_session_load_error(
+            options.project_path,
+            std::move(preview_error));
+        return failure;
+    }
+
+    impl_->load = attempted;
+    impl_->load.project = std::make_shared<ProjectData>(*attempted.project);
+    impl_->preview = std::move(next_preview);
+    impl_->undo_entries.clear();
+    impl_->redo_entries.clear();
+    // The one line that differs from open(): open() loaded a project that EXISTS
+    // on disk and can therefore establish a clean baseline. A created project has
+    // never been written, so an empty baseline -- which serialize_project can
+    // never produce -- keeps the session dirty from birth and makes it impossible
+    // for it to look clean over a file that does not exist.
+    impl_->saved_serialized_project.clear();
+    impl_->project_dirty = true;
+    ++impl_->project_revision;
+    ++impl_->runtime_revision;
+    ++impl_->preview_revision;
+    return attempted;
+}
+
+bool EditorSession::close() {
+    if (impl_->active_transaction.has_value()) {
+        return false;
+    }
+
+    impl_->load = ProjectLoadResult{};
+    impl_->preview = PreviewController{};
+    impl_->undo_entries.clear();
+    impl_->redo_entries.clear();
+    impl_->saved_serialized_project.clear();
+    impl_->project_dirty = false;
+    // BUMP, never reset. The shell drives its refresh off observed_* counters; a
+    // reset to zero would let a stale observed value compare equal and skip the
+    // resync that a close most needs.
+    ++impl_->project_revision;
+    ++impl_->runtime_revision;
+    ++impl_->preview_revision;
+    // next_transaction_id is deliberately NOT reset: ids must stay unique for the
+    // lifetime of the session object, or a stale EditTransaction handle from
+    // before the close could match a new transaction's id and write into a
+    // different project.
+    return true;
+}
+
 ProjectLoadResult EditorSession::open(const std::filesystem::path& path) {
     if (impl_->active_transaction.has_value()) {
         ProjectLoadResult result;
@@ -1756,6 +1894,124 @@ ProjectLoadResult EditorSession::reload() {
     return attempted;
 }
 
+SessionResult EditorSession::adopt_runtime_sources() {
+    if (!impl_->loaded()) {
+        return SessionResult{
+            false,
+            Impl::make_error(SessionErrorCode::NoProject, "No editor project is open.")};
+    }
+    if (impl_->active_transaction.has_value()) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::TransactionAlreadyActive,
+                "Cannot adopt runtime sources while an edit transaction is active.")};
+    }
+
+    // Everything below is built into LOCALS. The session is mutated only in the
+    // commit block at the end, after the last thing that can fail has succeeded.
+    // The shell used to assign `base_skeleton_document` and `atlas_data` BEFORE
+    // rebuilding -- and `ShellState::load_result` is a reference into this
+    // session -- so a failed rebuild had to be undone by hand, and the rollback's
+    // own rebuild result was discarded. That could leave `skeleton_data` derived
+    // from a different document than `base_skeleton_document`: an incoherent
+    // session in which commit() validates against one document while the preview
+    // shows another. Building into locals removes the rollback instead of adding
+    // a second one.
+    const runtime::json::LoadResult document_result =
+        runtime::load_skeleton_document(impl_->load.project->resolved_skeleton_path());
+    if (!document_result) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::RuntimeBuildFailed,
+                "The project's skeleton source did not load.",
+                document_result.error)};
+    }
+    const std::shared_ptr<const runtime::json::Document> next_document =
+        marrow::allocate_shared<runtime::json::Document>(std::move(*document_result.document));
+
+    std::vector<std::shared_ptr<const runtime::AtlasData>> next_atlas_data;
+    const std::vector<std::filesystem::path> atlas_paths =
+        impl_->load.project->resolved_atlas_paths();
+    next_atlas_data.reserve(atlas_paths.size());
+    for (const std::filesystem::path& atlas_path : atlas_paths) {
+        const auto atlas_result = runtime::AtlasLoader::load(atlas_path);
+        if (!atlas_result) {
+            return SessionResult{
+                false,
+                Impl::make_error(
+                    SessionErrorCode::RuntimeBuildFailed,
+                    "A project atlas source did not load.",
+                    atlas_result.error)};
+        }
+        next_atlas_data.push_back(atlas_result.atlas_data);
+    }
+
+    // Duration auto-extension reads the CURRENT runtime data, exactly as
+    // rebuild_runtime_without_history does; it is applied to a project copy so a
+    // later failure cannot leave the authored project half-extended.
+    ProjectData next_project = *impl_->load.project;
+    const AuthoringResult extension_result =
+        auto_extend_explicit_animation_durations(&next_project, *impl_->load.skeleton_data);
+    if (!extension_result) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::InvalidTransaction,
+                extension_result.error)};
+    }
+
+    const ProjectRuntimeResult runtime_result =
+        build_project_runtime(next_project, *next_document);
+    if (!runtime_result) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::RuntimeBuildFailed,
+                "The reloaded runtime sources did not produce valid runtime data.",
+                runtime_result.error)};
+    }
+
+    const PreviewController::Snapshot previous_preview = impl_->preview.capture();
+    const bool rebuild_playback = animation_catalog_or_timing_changed(
+        *impl_->load.skeleton_data,
+        *runtime_result.skeleton_data);
+    const runtime::AnimationStateSnapshot playback_snapshot =
+        impl_->preview.animation_state()->capture_state();
+    PreviewController next_preview;
+    std::string preview_error;
+    if (!next_preview.bind(
+            runtime_result.skeleton_data,
+            impl_->preview.state(),
+            true,
+            &preview_error) ||
+        (!rebuild_playback &&
+         !next_preview.restore_playback(playback_snapshot, &preview_error))) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::PreviewUpdateFailed,
+                std::move(preview_error))};
+    }
+    next_preview.restore_transient_state(previous_preview);
+
+    // Commit. The four runtime fields move together, so skeleton_data is always
+    // derived from the base_skeleton_document sitting beside it.
+    *impl_->load.project = std::move(next_project);
+    impl_->load.base_skeleton_document = next_document;
+    impl_->load.atlas_data = std::move(next_atlas_data);
+    impl_->load.skeleton_data = runtime_result.skeleton_data;
+    impl_->preview = std::move(next_preview);
+    impl_->update_dirty();
+    // Adoption replaces runtime SOURCES, never the authored project, so
+    // project_revision does not move. History snapshots hold ProjectData only and
+    // stay valid across it.
+    ++impl_->runtime_revision;
+    ++impl_->preview_revision;
+    return SessionResult{true, std::nullopt};
+}
+
 ProjectSaveResult EditorSession::save(const std::filesystem::path& path) {
     if (!impl_->loaded()) {
         return make_save_failure(path, "no editor project is open");
@@ -1776,10 +2032,25 @@ ProjectSaveResult EditorSession::save(const std::filesystem::path& path) {
     const bool source_changed = impl_->load.project->source_path != result.project->source_path;
     impl_->load.project = std::make_shared<ProjectData>(*result.project);
     if (source_changed) {
+        // A Save As rewrites the project's relative references so they still
+        // resolve (save_project -> rebase_project_paths). Every history snapshot
+        // holds a whole ProjectData carrying those same references, so rebasing
+        // only `source_path` would leave each snapshot pairing the NEW directory
+        // with the OLD relative paths: an undo would restore an in-memory project
+        // that no longer opens once saved. Rebase the snapshot itself, through
+        // the same single rule, and re-serialize the cached string that
+        // `histories_equal` and `apply_history`'s change detection compare -- the
+        // six rebased fields are all serialized, so a cached string left alone
+        // would describe a project that no longer exists.
         const auto rebase_history = [&](std::vector<Impl::HistoryEntry>* entries) {
+            const auto rebase_snapshot = [&](Impl::HistorySnapshot& snapshot) {
+                snapshot.project =
+                    rebase_project_paths(snapshot.project, result.project->source_path);
+                snapshot.serialized_project = serialize_project(snapshot.project);
+            };
             for (Impl::HistoryEntry& entry : *entries) {
-                entry.before.project.source_path = result.project->source_path;
-                entry.after.project.source_path = result.project->source_path;
+                rebase_snapshot(entry.before);
+                rebase_snapshot(entry.after);
                 entry.descriptor.allow_merge = false;
             }
         };
@@ -2273,6 +2544,36 @@ SessionResult EditorSession::undo() {
     return result;
 }
 
+SessionResult EditorSession::revert_last_edit() {
+    // `undo()` without the redo push. Same guards, deliberately: a revert during
+    // an active transaction is as wrong as an undo during one, and
+    // `clear_history()` carries the identical guard.
+    if (impl_->active_transaction.has_value()) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::TransactionAlreadyActive,
+                "Cannot revert an edit while an edit transaction is active.")};
+    }
+    if (impl_->undo_entries.empty()) {
+        return SessionResult{
+            false,
+            Impl::make_error(
+                SessionErrorCode::HistoryEmpty,
+                "There is no editor action to revert.")};
+    }
+    Impl::HistoryEntry entry = impl_->undo_entries.back();
+    const SessionResult result = impl_->apply_history(entry, true);
+    if (!result) {
+        return result;
+    }
+    impl_->undo_entries.pop_back();
+    // The entry is DROPPED here rather than pushed onto `redo_entries`. That one
+    // absent line is the whole difference from `undo()`, and it is what keeps a
+    // failed rollback from arming a Redo that would replay it.
+    return result;
+}
+
 SessionResult EditorSession::redo() {
     if (impl_->active_transaction.has_value()) {
         return SessionResult{
@@ -2312,6 +2613,26 @@ std::string_view EditorSession::redo_label() const noexcept {
         ? std::string_view{}
         : std::string_view(impl_->redo_entries.back().descriptor.label);
 }
+void EditorSession::stash_redo_stack() noexcept {
+    if (impl_->active_transaction.has_value()) {
+        return;
+    }
+    impl_->stashed_redo = std::move(impl_->redo_entries);
+    impl_->redo_entries.clear();
+}
+
+void EditorSession::restore_stashed_redo() noexcept {
+    if (impl_->active_transaction.has_value()) {
+        return;
+    }
+    impl_->redo_entries = std::move(impl_->stashed_redo);
+    impl_->stashed_redo.clear();
+}
+
+void EditorSession::drop_redo_stash() noexcept {
+    impl_->stashed_redo.clear();
+}
+
 void EditorSession::clear_history() noexcept {
     if (impl_->active_transaction.has_value()) {
         return;

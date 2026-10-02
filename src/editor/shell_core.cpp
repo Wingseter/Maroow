@@ -3,6 +3,7 @@
 #include "shell_coalesced_edit.hpp"
 #include "shell_selection.hpp"
 #include "shell_weight_paint.hpp"
+#include "shell_recent_projects.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -258,13 +259,9 @@ void update_project_dirty_state(ShellState* state) {
 }
 
 void sync_shell_from_editor_session(ShellState* state) {
-    if (state == nullptr || !state->session.has_project()) {
+    if (state == nullptr) {
         return;
     }
-    state->preview_skeleton =
-        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
-    state->animation_state =
-        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
 
     const marrow::editor::PreviewState& preview = state->session.preview_state();
     state->selected_animation_name = preview.animation_name;
@@ -298,7 +295,7 @@ void sync_shell_from_editor_session(ShellState* state) {
 }
 
 void sync_shell_from_editor_session_if_revised(ShellState* state) {
-    if (state == nullptr || !state->session.has_project()) {
+    if (state == nullptr) {
         return;
     }
     if (state->observed_project_revision != state->session.project_revision() ||
@@ -358,19 +355,11 @@ bool record_action_from_snapshots(
             state->session.runtime_revision() != before.runtime_revision);
     if (!commit_result) {
         state->error_message = commit_result.error->format();
-        state->preview_skeleton =
-            marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
-        state->animation_state =
-            marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
         return false;
     }
     if (!commit_result.changed) {
         return false;
     }
-    state->preview_skeleton =
-        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
-    state->animation_state =
-        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
     update_project_dirty_state(state);
     state->error_message.clear();
     state->status_message = std::move(label);
@@ -428,62 +417,19 @@ bool cancel_coalesced_edit(ShellState* state) {
     return true;
 }
 
-void cancel_authoring_gestures(ShellState* state, std::string_view reason) {
-    if (state == nullptr) {
+void normalize_shell_preview_composition_to_runtime(ShellState* state) {
+    if (state == nullptr || state->load_result.skeleton_data == nullptr) {
         return;
     }
-
-    bool cancelled = false;
-    cancelled = cancel_coalesced_edit(state);
-    if (state->weight_paint_stroke.active) {
-        const EditorHistorySnapshot before =
-            state->weight_paint_stroke.before_snapshot;
-        reset_weight_paint_stroke(state);
-        restore_history_snapshot(state, before);
-        cancelled = true;
-    }
-    // This list must stay in step with authoring_gesture_active
-    // (shell_state.hpp); a gesture missing here leaks a live transaction
-    // that blocks every future begin_edit.
-    const auto cancel_transaction_gesture = [&](auto& gesture_slot) {
-        if (gesture_slot.has_value()) {
-            gesture_slot->transaction.cancel();
-            gesture_slot.reset();
-            cancelled = true;
-        }
-    };
-    cancel_transaction_gesture(state->animation_duration_gesture);
-    cancel_transaction_gesture(state->inspector_transform_gesture);
-    if (state->viewport_transform_gesture.has_value()) {
-        ViewportTransformGesture gesture =
-            std::move(*state->viewport_transform_gesture);
-        state->viewport_transform_gesture.reset();
-        gesture.transaction.cancel();
-        state->selection = gesture.selection_before;
-        state->hierarchy_selection_anchor = gesture.hierarchy_anchor_before;
-        state->selected_timeline_track_id = gesture.timeline_focus_before;
-        cancelled = true;
-    }
-    if (state->viewport_ffd_gesture.has_value()) {
-        ViewportFfdGesture gesture =
-            std::move(*state->viewport_ffd_gesture);
-        state->viewport_ffd_gesture.reset();
-        gesture.transaction.cancel();
-        state->selection = gesture.selection_before;
-        state->viewport_ffd_selection = gesture.vertex_selection_before;
-        state->hierarchy_selection_anchor = gesture.hierarchy_anchor_before;
-        state->selected_timeline_track_id = gesture.timeline_focus_before;
-        cancelled = true;
-    }
-    cancel_transaction_gesture(state->timeline_editor.retime_gesture);
-    cancel_transaction_gesture(state->parameter_slider_gesture);
-    cancel_transaction_gesture(state->parameter_geometry_gesture);
-    state->viewport_ffd_box_selection.reset();
-    state->viewport_box_selection.reset();
-    state->pointer_mediator.reset();
-    sync_shell_from_editor_session(state);
-    if (cancelled) {
-        state->status_message = "Cancelled active edit: " + std::string(reason);
+    // Only shell working composition needs normalization. Runtime views are
+    // resolved on demand through ShellState's session accessors.
+    state->preview_skin_names = normalize_preview_skin_names(
+        *state->load_result.skeleton_data,
+        state->preview_skin_names);
+    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
+    if (!state->selected_animation_name.empty() &&
+        state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
+        state->selected_animation_name.clear();
     }
 }
 
@@ -494,8 +440,8 @@ bool rebuild_project_runtime(ShellState* state) {
     }
 
     std::optional<marrow::runtime::AnimationStateSnapshot> playback_snapshot;
-    if (state->animation_state != nullptr) {
-        playback_snapshot = state->animation_state->capture_state();
+    if (state->animation_state() != nullptr) {
+        playback_snapshot = state->animation_state()->capture_state();
     }
 
     const marrow::editor::SessionResult runtime_result =
@@ -505,24 +451,84 @@ bool rebuild_project_runtime(ShellState* state) {
         state->error_message = runtime_result.error->format();
         return false;
     }
-    state->preview_skeleton =
-        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
-    state->animation_state =
-        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
-    if (playback_snapshot.has_value() && state->animation_state != nullptr) {
-        state->animation_state->restore_state(*playback_snapshot);
-    }
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->preview_skin_names);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    if (!state->selected_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(state->selected_animation_name) == nullptr) {
-        state->selected_animation_name.clear();
+    normalize_shell_preview_composition_to_runtime(state);
+    if (playback_snapshot.has_value() && state->animation_state() != nullptr) {
+        state->animation_state()->restore_state(*playback_snapshot);
     }
 
     return true;
+}
+
+void adopt_session_project_into_shell(
+    ShellState* state,
+    const std::string& previous_animation_name,
+    double previous_timeline_time,
+    bool previous_timeline_loop,
+    bool previous_timeline_playing,
+    bool restore_transient_playback,
+    bool project_is_clean) {
+    // A source adoption invalidates the screen-space rectangle captured by an
+    // in-flight viewport box gesture, even when every selected identity survives.
+    state->viewport_ffd_selection.reset();
+    state->viewport_ffd_box_selection.reset();
+    state->viewport_box_selection.reset();
+    state->selected_timeline_track_id.reset();
+    state->timeline_editor = TimelineEditorState{};
+    state->preview_skin_names.clear();
+    state->preview_slot_overrides.clear();
+    state->selected_animation_name.clear();
+    state->timeline_time_seconds = 0.0;
+    state->timeline_loop = previous_timeline_loop;
+    state->timeline_playing = false;
+    // MAR-174: the one documented session default, reached by open, reload, and
+    // replace alike because both load branches converge here.
+    state->preview_speed = kDefaultPreviewSpeed;
+    state->pending_edit_action.reset();
+    
+    state->project_dirty = !project_is_clean;
+    state->error_message.clear();
+
+    state->viewport = state->load_result.project->editor_metadata.viewport;
+    state->timeline_editor.frames_per_second =
+        state->load_result.project->editor_metadata.timeline.frames_per_second;
+    state->preview_skin_names = normalize_preview_skin_names(
+        *state->load_result.skeleton_data,
+        state->load_result.project->editor_metadata.preview_skins);
+    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
+
+    const auto& animations = state->load_result.skeleton_data->animations();
+    if (!previous_animation_name.empty() &&
+        state->load_result.skeleton_data->find_animation(previous_animation_name) != nullptr) {
+        state->selected_animation_name = previous_animation_name;
+    } else if (!state->load_result.project->editor_metadata.active_animation.empty() &&
+               state->load_result.skeleton_data->find_animation(
+                   state->load_result.project->editor_metadata.active_animation) != nullptr) {
+        state->selected_animation_name = state->load_result.project->editor_metadata.active_animation;
+    } else if (!animations.empty()) {
+        state->selected_animation_name = animations.front().name;
+    }
+    normalize_state_preview_settings(state);
+    if (restore_transient_playback) {
+        sync_shell_from_editor_session(state);
+    } else if (!state->selected_animation_name.empty()) {
+        state->timeline_time_seconds = std::clamp(
+            previous_timeline_time,
+            0.0,
+            timeline_preview_duration(*state));
+        state->timeline_playing = previous_timeline_playing;
+        state->session.select_animation(state->selected_animation_name, true);
+        state->session.set_loop(state->timeline_loop);
+        state->session.seek(state->timeline_time_seconds);
+        state->session.set_playing(state->timeline_playing);
+    }
+    (void)initialize_viewport_camera_from_preview_pose(state);
+    reset_runtime_asset_watch(state);
+    marrow::editor::reconcile_selection_to_runtime(
+        state->selection,
+        *state->load_result.skeleton_data);
+    reconcile_hierarchy_anchor_to_runtime(
+        state,
+        *state->load_result.skeleton_data);
 }
 
 bool reload_project(ShellState* state) {
@@ -553,75 +559,14 @@ bool reload_project(ShellState* state) {
         return false;
     }
 
-    // A source adoption invalidates the screen-space rectangle captured by an
-    // in-flight viewport box gesture, even when every selected identity survives.
-    state->viewport_ffd_selection.reset();
-    state->viewport_ffd_box_selection.reset();
-    state->viewport_box_selection.reset();
-    state->preview_skeleton = nullptr;
-    state->animation_state = nullptr;
-    state->selected_timeline_track_id.reset();
-    state->timeline_editor = TimelineEditorState{};
-    state->preview_skin_names.clear();
-    state->preview_slot_overrides.clear();
-    state->selected_animation_name.clear();
-    state->timeline_time_seconds = 0.0;
-    state->timeline_loop = previous_timeline_loop;
-    state->timeline_playing = false;
-    state->pending_edit_action.reset();
-    
-    state->project_dirty = false;
-    state->saved_project_snapshot.clear();
-    state->error_message.clear();
-
-    state->viewport = state->load_result.project->editor_metadata.viewport;
-    state->timeline_editor.frames_per_second =
-        state->load_result.project->editor_metadata.timeline.frames_per_second;
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
-    state->preview_skeleton =
-        marrow::editor::EditorSessionShellBinding::preview_skeleton(state->session);
-    state->animation_state =
-        marrow::editor::EditorSessionShellBinding::preview_animation_state(state->session);
-    state->preview_skin_names = normalize_preview_skin_names(
-        *state->load_result.skeleton_data,
-        state->load_result.project->editor_metadata.preview_skins);
-    state->preview_slot_overrides.resize(state->load_result.skeleton_data->slots().size());
-
-    const auto& animations = state->load_result.skeleton_data->animations();
-    if (!previous_animation_name.empty() &&
-        state->load_result.skeleton_data->find_animation(previous_animation_name) != nullptr) {
-        state->selected_animation_name = previous_animation_name;
-    } else if (!state->load_result.project->editor_metadata.active_animation.empty() &&
-               state->load_result.skeleton_data->find_animation(
-                   state->load_result.project->editor_metadata.active_animation) != nullptr) {
-        state->selected_animation_name = state->load_result.project->editor_metadata.active_animation;
-    } else if (!animations.empty()) {
-        state->selected_animation_name = animations.front().name;
-    }
-    normalize_state_preview_settings(state);
-    if (reload_current_project) {
-        sync_shell_from_editor_session(state);
-    } else if (!state->selected_animation_name.empty()) {
-        state->timeline_time_seconds = std::clamp(
-            previous_timeline_time,
-            0.0,
-            timeline_preview_duration(*state));
-        state->timeline_playing = previous_timeline_playing;
-        state->session.select_animation(state->selected_animation_name, true);
-        state->session.set_loop(state->timeline_loop);
-        state->session.seek(state->timeline_time_seconds);
-        state->session.set_playing(state->timeline_playing);
-    }
-    (void)initialize_viewport_camera_from_preview_pose(state);
-    reset_runtime_asset_watch(state);
-    marrow::editor::reconcile_selection_to_runtime(
-        state->selection,
-        *state->load_result.skeleton_data);
-    reconcile_hierarchy_anchor_to_runtime(
+    adopt_session_project_into_shell(
         state,
-        *state->load_result.skeleton_data);
-
+        previous_animation_name,
+        previous_timeline_time,
+        previous_timeline_loop,
+        previous_timeline_playing,
+        /*restore_transient_playback=*/reload_current_project,
+        /*project_is_clean=*/true);
     return true;
 }
 
@@ -641,10 +586,20 @@ bool save_project_file(ShellState* state, bool update_status_message) {
         return false;
     }
 
-    state->saved_project_snapshot =
-        marrow::editor::serialize_project(*state->load_result.project);
     state->project_dirty = state->session.dirty();
     state->error_message.clear();
+    // MAR-183: ONLY the FIRST successful save of a New session records. An
+    // ordinary Save is this same function with no arm, and AC2 says it records
+    // nothing. Comparing against the path actually written -- rather than
+    // reading a bare bool -- is what stops a Save As that moved the session
+    // elsewhere from consuming an arm it did not satisfy.
+    if (state->pending_recent_on_first_save.has_value() &&
+        *state->pending_recent_on_first_save == state->project_path) {
+        // reset() BEFORE the record, so a failure inside the recorder cannot
+        // leave the arm live for a second save to consume.
+        state->pending_recent_on_first_save.reset();
+        record_recent_project(state, state->project_path);
+    }
     if (update_status_message) {
         state->status_message = "Saved project to " + state->project_path.string();
     }

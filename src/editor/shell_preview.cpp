@@ -1,5 +1,7 @@
 #include "shell_preview.hpp"
 
+#include "shell_file_paths.hpp"
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -9,6 +11,7 @@
 
 #include "imgui.h"
 
+#include "shell_constraints.hpp"
 #include "shell_selection.hpp"
 #include "viewport_ffd_controller.hpp"
 #include "shell_state.hpp"
@@ -79,7 +82,7 @@ void apply_preview_slot_overrides(
 }
 
 void apply_preview_slot_overrides(ShellState* state) {
-    if (!state->load_result || !state->preview_skeleton) {
+    if (!state->load_result || !state->preview_skeleton()) {
         return;
     }
 
@@ -95,7 +98,7 @@ void apply_preview_slot_overrides(ShellState* state) {
         }
     }
 
-    apply_preview_slot_overrides(*state, state->preview_skeleton);
+    apply_preview_slot_overrides(*state, state->preview_skeleton());
 }
 
 bool apply_project_command_change(
@@ -164,6 +167,7 @@ bool undo_project_change(ShellState* state) {
         return false;
     }
     viewport_ffd::reconcile_selection(state);
+    reconcile_constraint_selection(state);
 
     update_project_dirty_state(state);
     state->status_message = "Undid " + label;
@@ -193,6 +197,7 @@ bool redo_project_change(ShellState* state) {
         return false;
     }
     viewport_ffd::reconcile_selection(state);
+    reconcile_constraint_selection(state);
 
     update_project_dirty_state(state);
     state->status_message = "Redid " + label;
@@ -206,6 +211,15 @@ void handle_project_history_shortcuts(ShellState* state) {
 
     const ImGuiIO& io = ImGui::GetIO();
     if (io.WantTextInput) {
+        return;
+    }
+
+    // BELOW the io.WantTextInput guard above, so typing a filename into the path
+    // modal cannot save the project. Save is the only one of the four File
+    // actions with a shortcut: it neither replaces the session nor needs a
+    // modal, so it needs no MAR-182 gate and cannot surprise the user.
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, ImGuiInputFlags_RouteGlobal)) {
+        begin_file_action(state, FileAction::Save);
         return;
     }
 
@@ -273,7 +287,7 @@ std::optional<std::size_t> preview_root_bone_index(
 }
 
 bool apply_current_animation_state_to_preview(ShellState* state) {
-    if (!state->load_result || !state->preview_skeleton || !state->animation_state) {
+    if (!state->load_result || !state->preview_skeleton() || !state->animation_state()) {
         return false;
     }
 
@@ -288,7 +302,7 @@ bool apply_current_animation_state_to_preview(ShellState* state) {
         skin_names.push_back(skin_name);
     }
 
-    if (!state->preview_skeleton->set_skin_composition(skin_names)) {
+    if (!state->preview_skeleton()->set_skin_composition(skin_names)) {
         state->error_message = "Failed to apply the requested preview skin composition.";
         return false;
     }
@@ -296,8 +310,8 @@ bool apply_current_animation_state_to_preview(ShellState* state) {
     state->preview_root_motion_delta = {};
     state->preview_root_motion_total = {};
     state->preview_events.clear();
-    state->preview_skeleton->set_attachment_playback_time(state->timeline_time_seconds);
-    state->animation_state->apply(*state->preview_skeleton);
+    state->preview_skeleton()->set_attachment_playback_time(state->timeline_time_seconds);
+    state->animation_state()->apply(*state->preview_skeleton());
     apply_preview_slot_overrides(state);
     state->error_message.clear();
     return true;
@@ -306,14 +320,14 @@ bool apply_current_animation_state_to_preview(ShellState* state) {
 bool restore_preview_playback(
     ShellState* state,
     const marrow::runtime::AnimationStateSnapshot& snapshot) {
-    if (!state->animation_state || !state->preview_skeleton || !state->load_result) {
+    if (!state->animation_state() || !state->preview_skeleton() || !state->load_result) {
         return false;
     }
 
-    state->animation_state->restore_state(snapshot);
+    state->animation_state()->restore_state(snapshot);
 
     if (const std::shared_ptr<marrow::runtime::TrackEntry> current =
-            state->animation_state->get_current(0);
+            state->animation_state()->get_current(0);
         current != nullptr && !current->is_empty &&
         state->load_result.skeleton_data->find_animation(current->animation_name) != nullptr) {
         state->selected_animation_name = current->animation_name;
@@ -327,7 +341,7 @@ bool restore_preview_playback(
 }
 
 bool refresh_preview_pose(ShellState* state) {
-    if (!state->load_result || !state->preview_skeleton) {
+    if (!state->load_result || !state->preview_skeleton()) {
         return false;
     }
     normalize_state_preview_settings(state);

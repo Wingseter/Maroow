@@ -146,12 +146,14 @@ void draw_agent_window(ShellState* state) {
                         request.message.c_str());
                 }
                 if (request.allowed) {
-                    // Import/pack v1 queues targets only; execution stays in
-                    // the CLI importers, so the button must not claim the
-                    // operation ran.
+                    // MAR-189 made ImportOrPack executable for `import.psd_layers`.
+                    // Every other import/pack op still only queues targets, so the
+                    // button must not claim those ran.
                     const bool executes =
                         request.kind == AgentReviewKind::SaveProject ||
-                        request.kind == AgentReviewKind::ExportRuntime;
+                        request.kind == AgentReviewKind::ExportRuntime ||
+                        (request.kind == AgentReviewKind::ImportOrPack &&
+                         request.op == "import.psd_layers");
                     if (ImGui::Button(executes ? "Approve" : "Acknowledge")) {
                         if (request.kind == AgentReviewKind::SaveProject) {
                             if (save_project_file(state, true)) {
@@ -168,6 +170,17 @@ void draw_agent_window(ShellState* state) {
                                     std::to_string(request.id);
                                 remove_review_id = request.id;
                             }
+                        } else if (
+                            request.kind == AgentReviewKind::ImportOrPack &&
+                            request.op == "import.psd_layers") {
+                            // The queue entry is removed by `apply_agent_review`
+                            // itself on success, so nothing is set here. A failed
+                            // commit leaves the request in place deliberately: the
+                            // bundle is unchanged and the request is the only
+                            // record of what was asked.
+                            const AgentDispatchResult applied = apply_agent_review(
+                                state->session, state->agent_control, request.id);
+                            state->status_message = applied.message;
                         } else {
                             state->status_message =
                                 "Acknowledged import/pack request #" +

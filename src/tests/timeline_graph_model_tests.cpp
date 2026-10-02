@@ -804,6 +804,516 @@ void test_nonfinite_cubic_control_fails_closed(TestSuite& suite) {
         "a non-finite cubic control must return InvalidData without a track");
 }
 
+
+void test_graph_drag_axis_and_unit_mapping(TestSuite& suite) {
+    constexpr graph::PlotRect rect{100.0, 40.0, 700.0, 340.0};
+    const graph::View view{0.5, 200.0, 10.0, 25.0};
+
+    suite.expect(
+        near(graph::time_at_x(rect, view, graph::x_at_time(rect, view, 1.25)), 1.25, 1e-9) &&
+            near(graph::value_at_y(rect, view, graph::y_at_value(rect, view, -3.5)), -3.5, 1e-9),
+        "pixel and unit mapping must round-trip");
+
+    const graph::View negative_start{-2.25, 37.5, -18.0, 0.125};
+    suite.expect(
+        near(
+            graph::time_at_x(
+                rect, negative_start, graph::x_at_time(rect, negative_start, -1.75)),
+            -1.75,
+            1e-9) &&
+            near(
+                graph::value_at_y(
+                    rect, negative_start, graph::y_at_value(rect, negative_start, 96.5)),
+                96.5,
+                1e-9),
+        "a negative view start and a sub-unit value scale must still round-trip");
+
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 302.0, 201.0, 4.0) ==
+            graph::DragAxis::Undecided,
+        "a move inside the dead zone must not choose an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 320.0, 203.0, 4.0) == graph::DragAxis::Time,
+        "a dominant horizontal move must lock the time axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 303.0, 220.0, 4.0) == graph::DragAxis::Value,
+        "a dominant vertical move must lock the value axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 310.0, 210.0, 4.0) == graph::DragAxis::Value,
+        "an exact axis tie must resolve to the value axis");
+    // The dead zone is a box compared with >=, so exactly the threshold locks.
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 304.0, 200.0, 4.0) == graph::DragAxis::Time &&
+            graph::decide_drag_axis(300.0, 200.0, 300.0, 196.0, 4.0) ==
+                graph::DragAxis::Value,
+        "a move of exactly the dead-zone distance must lock an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 303.999, 203.999, 4.0) ==
+            graph::DragAxis::Undecided,
+        "a diagonal move just inside the dead-zone box must not lock an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 320.0, 203.0) == graph::DragAxis::Time,
+        "the default dead zone must come from kDragDeadZonePixels");
+    suite.expect(
+        graph::decide_drag_axis(
+            std::numeric_limits<double>::quiet_NaN(), 200.0, 310.0, 210.0, 4.0) ==
+            graph::DragAxis::Undecided,
+        "non-finite pointer input must not choose an axis");
+    suite.expect(
+        graph::decide_drag_axis(
+            300.0, 200.0, 310.0, 210.0,
+            std::numeric_limits<double>::infinity()) == graph::DragAxis::Undecided,
+        "a non-finite dead zone must not choose an axis");
+    suite.expect(
+        graph::decide_drag_axis(300.0, 200.0, 310.0, 210.0, -1.0) ==
+            graph::DragAxis::Undecided,
+        "a negative dead zone must not choose an axis");
+
+    const auto time_delta = graph::drag_time_delta(view, 300.0, 400.0);
+    suite.expect(
+        time_delta.has_value() && near(*time_delta, 0.5),
+        "time delta must divide the pixel delta by pixels per second");
+    const auto value_delta = graph::drag_value_delta(view, 300.0, 200.0);
+    suite.expect(
+        value_delta.has_value() && near(*value_delta, 4.0),
+        "value delta must invert screen Y and divide by pixels per value");
+    const auto negative_value_delta = graph::drag_value_delta(view, 200.0, 300.0);
+    suite.expect(
+        negative_value_delta.has_value() && near(*negative_value_delta, -4.0),
+        "downward screen motion must produce a negative value delta");
+
+    graph::View degenerate = view;
+    degenerate.pixels_per_value = 0.0;
+    suite.expect(
+        !graph::drag_value_delta(degenerate, 300.0, 200.0).has_value(),
+        "a non-positive value scale must reject the drag delta");
+    graph::View degenerate_time = view;
+    degenerate_time.pixels_per_second = std::numeric_limits<double>::quiet_NaN();
+    suite.expect(
+        !graph::drag_time_delta(degenerate_time, 300.0, 400.0).has_value(),
+        "a non-finite time scale must reject the drag delta");
+    suite.expect(
+        !graph::drag_time_delta(
+             view, std::numeric_limits<double>::infinity(), 400.0).has_value(),
+        "a non-finite press coordinate must reject the drag delta");
+    suite.expect(
+        !graph::drag_value_delta(
+             view, 300.0, std::numeric_limits<double>::quiet_NaN()).has_value(),
+        "a non-finite pointer coordinate must reject the drag delta");
+
+    graph::View overflow_view = view;
+    overflow_view.pixels_per_value = std::numeric_limits<double>::denorm_min();
+    suite.expect(
+        !graph::drag_value_delta(
+             overflow_view, std::numeric_limits<double>::max(), -std::numeric_limits<double>::max())
+             .has_value(),
+        "an overflowing quotient must reject the drag delta");
+
+    // A rect wide enough to overflow a naive (min + max) * 0.5 must still map
+    // through the shared safe midpoint the geometry builder uses.
+    const double huge_low = std::numeric_limits<double>::max() * 0.6;
+    const double huge_high = std::numeric_limits<double>::max() * 0.9;
+    const graph::PlotRect huge_rect{0.0, huge_low, 100.0, huge_high};
+    const graph::View unit_view{0.0, 100.0, 0.0, 1.0};
+    const double expected_midpoint = std::numeric_limits<double>::max() * 0.75;
+    suite.expect(
+        !std::isfinite((huge_rect.min_y + huge_rect.max_y) * 0.5) &&
+            std::isfinite(graph::y_at_value(huge_rect, unit_view, 2.0)) &&
+            near_scaled(
+                graph::y_at_value(huge_rect, unit_view, 2.0), expected_midpoint) &&
+            near(graph::value_at_y(huge_rect, unit_view, expected_midpoint), 0.0, 1e-9),
+        "near-limit rects must map through the shared safe midpoint");
+
+    // The render path and the drag path must agree on every submitted point.
+    const graph::View render_view{-0.1, 200.0, 10.0, 25.0};
+    const auto track = make_scalar_track(
+        marrow::runtime::Interpolation::linear(), 8.0, 12.0);
+    const auto geometry = graph::build_geometry(
+        track, {true, false, false, false}, render_view, rect, 0.5);
+    suite.expect(
+        geometry.has_value() && geometry->points.size() == 2U,
+        "the mapping comparison requires two submitted graph points");
+    if (geometry.has_value()) {
+        bool matched = !geometry->points.empty();
+        for (const auto& point : geometry->points) {
+            const auto key = std::find_if(
+                track.keys.begin(),
+                track.keys.end(),
+                [&](const graph::Key& candidate) {
+                    return candidate.identity == point.key;
+                });
+            if (key == track.keys.end()) {
+                matched = false;
+                break;
+            }
+            matched = matched &&
+                near(
+                    graph::x_at_time(rect, render_view, key->time_seconds),
+                    point.position.x,
+                    1e-9) &&
+                near(
+                    graph::y_at_value(
+                        rect, render_view, key->values[point.component_index]),
+                    point.position.y,
+                    1e-9);
+        }
+        suite.expect(
+            matched,
+            "x_at_time and y_at_value must reproduce the submitted point coordinates");
+    }
+}
+
+void test_graph_handle_geometry_and_pointer_mapping(TestSuite& suite) {
+    constexpr graph::PlotRect rect{100.0, 40.0, 700.0, 340.0};
+    // A negative view start and a sub-unit value scale, so the mapping is
+    // exercised away from any accidental identity.
+    const graph::View view{-0.25, 200.0, 10.0, 0.5};
+
+    // --- Seeding. ---
+    suite.expect(
+        graph::seed_control_points(
+            graph::SegmentKind::Linear, {0.9, 0.9, 0.1, 0.1}) ==
+                graph::kLinearEquivalentControlPoints &&
+            graph::seed_control_points(
+                graph::SegmentKind::Stepped, {0.9, 0.9, 0.1, 0.1}) ==
+                graph::kLinearEquivalentControlPoints &&
+            graph::seed_control_points(
+                graph::SegmentKind::Cubic, {0.9, 0.9, 0.1, 0.1}) ==
+                std::array<double, 4>{0.9, 0.9, 0.1, 0.1},
+        "only a cubic segment keeps its stored control points");
+
+    const auto seeded = marrow::runtime::Interpolation::cubic_bezier(
+        graph::kLinearEquivalentControlPoints[0],
+        graph::kLinearEquivalentControlPoints[1],
+        graph::kLinearEquivalentControlPoints[2],
+        graph::kLinearEquivalentControlPoints[3]);
+    suite.expect(
+        near(seeded.transform(0.25), 0.25, 1e-3) &&
+            near(seeded.transform(0.75), 0.75, 1e-3),
+        "the conversion seed must evaluate identically to linear");
+
+    // --- Segment frames. ---
+    const auto varying_track = make_scalar_track(
+        marrow::runtime::Interpolation::linear(), 8.0, 12.0);
+    const auto frame = graph::make_segment_frame(varying_track, 0U, 0U, view);
+    suite.expect(
+        frame.has_value() && !frame->flat_value_span &&
+            near(frame->value_span, 4.0, 1e-12) &&
+            near(frame->time_span, 1.0, 1e-12) &&
+            frame->start_value == 8.0 && frame->end_value == 12.0,
+        "a varying segment must use its own value span");
+
+    // 1.0 -> 1.0 with pixels_per_value = 0.5 is flat in every view.
+    const auto flat_track = make_scalar_track(
+        marrow::runtime::Interpolation::linear(), 1.0, 1.0);
+    const auto flat = graph::make_segment_frame(flat_track, 0U, 0U, view);
+    suite.expect(
+        flat.has_value() && flat->flat_value_span &&
+            near(
+                flat->value_span,
+                graph::kFlatSegmentHandlePixels / view.pixels_per_value,
+                1e-12) &&
+            flat->value_span > 0.0,
+        "a flat segment must substitute the positive fallback span");
+
+    // A raw span of 1e-9 units is 5e-10 px at this scale: still flat, and the
+    // substituted span must stay positive even though the raw span is negative.
+    const auto near_flat_track = make_scalar_track(
+        marrow::runtime::Interpolation::linear(), 1.0, 1.0 - 1e-9);
+    const auto near_flat = graph::make_segment_frame(near_flat_track, 0U, 0U, view);
+    suite.expect(
+        near_flat.has_value() && near_flat->flat_value_span &&
+            near_flat->value_span > 0.0,
+        "a sub-pixel value span must be treated as flat with a positive span");
+
+    auto zero_duration_track = varying_track;
+    zero_duration_track.keys[1].time_seconds = zero_duration_track.keys[0].time_seconds;
+    suite.expect(
+        !graph::make_segment_frame(zero_duration_track, 0U, 0U, view).has_value(),
+        "a zero-duration segment must have no frame");
+    suite.expect(
+        !graph::make_segment_frame(varying_track, 0U, 9U, view).has_value(),
+        "an out-of-range component index must have no frame");
+    suite.expect(
+        !graph::make_segment_frame(varying_track, 1U, 0U, view).has_value(),
+        "the last key must have no outgoing frame");
+    auto nonfinite_track = varying_track;
+    nonfinite_track.keys[1].values[0] = std::numeric_limits<double>::quiet_NaN();
+    suite.expect(
+        !graph::make_segment_frame(nonfinite_track, 0U, 0U, view).has_value(),
+        "a non-finite anchor must have no frame");
+
+    // --- Handle geometry. ---
+    const auto handles = graph::build_handle_geometry(
+        varying_track, varying_track.keys[0].identity, 0U, view, rect);
+    suite.expect(
+        handles.has_value() && handles->kind == graph::SegmentKind::Linear &&
+            handles->control_points == graph::kLinearEquivalentControlPoints &&
+            handles->key_index == 0U && handles->component_index == 0U,
+        "a linear segment must expose seeded handles");
+    if (!handles.has_value()) return;
+    suite.expect(
+        near(
+            handles->first_handle.x,
+            graph::x_at_time(
+                rect,
+                view,
+                handles->frame.start_time_seconds +
+                    handles->control_points[0] * handles->frame.time_span),
+            1e-9) &&
+            near(
+                handles->first_handle.y,
+                graph::y_at_value(
+                    rect,
+                    view,
+                    handles->frame.start_value +
+                        handles->control_points[1] * handles->frame.value_span),
+                1e-9),
+        "handle 1 must sit at cx1/cy1 along the frozen frame");
+    suite.expect(
+        near(
+            handles->second_handle.x,
+            graph::x_at_time(
+                rect,
+                view,
+                handles->frame.start_time_seconds +
+                    handles->control_points[2] * handles->frame.time_span),
+            1e-9) &&
+            near(
+                handles->second_handle.y,
+                graph::y_at_value(
+                    rect,
+                    view,
+                    handles->frame.start_value +
+                        handles->control_points[3] * handles->frame.value_span),
+                1e-9),
+        "handle 2 must sit at cx2/cy2 along the frozen frame");
+    suite.expect(
+        near(
+            handles->start_anchor.x,
+            graph::x_at_time(rect, view, handles->frame.start_time_seconds),
+            1e-9) &&
+            near(
+                handles->end_anchor.x,
+                graph::x_at_time(rect, view, handles->frame.end_time_seconds),
+                1e-9),
+        "the anchors must sit on the segment's two keys");
+    suite.expect(
+        !graph::build_handle_geometry(
+             varying_track, varying_track.keys.back().identity, 0U, view, rect)
+             .has_value(),
+        "the last key must expose no outgoing handles");
+    suite.expect(
+        !graph::build_handle_geometry(
+             varying_track, varying_track.keys[0].identity, 3U, view, rect)
+             .has_value(),
+        "an out-of-range component must expose no handles");
+    model::KeyRef stranger{"bone:9:Translate", 0, 0U, 1U};
+    suite.expect(
+        !graph::build_handle_geometry(varying_track, stranger, 0U, view, rect)
+             .has_value(),
+        "a key from another track must expose no handles");
+    suite.expect(
+        !graph::build_handle_geometry(
+             zero_duration_track, zero_duration_track.keys[0].identity, 0U, view, rect)
+             .has_value(),
+        "a zero-duration segment must expose no handles");
+
+    // --- Render/drag agreement: the handle X coordinates must land on the
+    // same mapping the rendered polyline uses. ---
+    const auto cubic_track = make_scalar_track(
+        marrow::runtime::Interpolation::cubic_bezier(0.25, 0.1, 0.75, 0.9), 8.0, 12.0);
+    const auto cubic_handles = graph::build_handle_geometry(
+        cubic_track, cubic_track.keys[0].identity, 0U, view, rect);
+    const auto cubic_geometry = graph::build_geometry(
+        cubic_track, {true, false, false, false}, view, rect, 0.0);
+    // Stored control points are float32, so the read-back is compared with the
+    // narrowing tolerance rather than bitwise.
+    suite.expect(
+        cubic_handles.has_value() && cubic_geometry.has_value() &&
+            cubic_handles->kind == graph::SegmentKind::Cubic &&
+            near(cubic_handles->control_points[0], 0.25, 1e-6) &&
+            near(cubic_handles->control_points[1], 0.1, 1e-6) &&
+            near(cubic_handles->control_points[2], 0.75, 1e-6) &&
+            near(cubic_handles->control_points[3], 0.9, 1e-6),
+        "a cubic segment must expose its stored control points");
+    if (cubic_handles.has_value() && cubic_geometry.has_value() &&
+        !cubic_geometry->segments.empty()) {
+        const auto& polyline = cubic_geometry->segments.front().polyline;
+        suite.expect(
+            polyline.size() >= 2U &&
+                near(cubic_handles->start_anchor.x, polyline.front().x, 1e-9) &&
+                near(cubic_handles->start_anchor.y, polyline.front().y, 1e-9) &&
+                near(cubic_handles->end_anchor.x, polyline.back().x, 1e-9) &&
+                near(cubic_handles->end_anchor.y, polyline.back().y, 1e-9),
+            "the handle anchors and the rendered polyline must share one mapping");
+        suite.expect(
+            near(
+                cubic_handles->first_handle.x,
+                graph::x_at_time(rect, view, 0.0 + 0.25 * 1.0),
+                1e-9) &&
+                near(
+                    cubic_handles->second_handle.x,
+                    graph::x_at_time(rect, view, 0.0 + 0.75 * 1.0),
+                    1e-9),
+            "cubic handle X must be x_at_time of the normalized control time");
+    }
+
+    // --- Round trip, both handles, varying and flat. ---
+    const auto moved = graph::control_points_from_handle_pointer(
+        handles->frame, handles->control_points, graph::HandleIndex::Second,
+        view, rect, handles->second_handle.x, handles->second_handle.y);
+    suite.expect(
+        moved.has_value() && near((*moved)[2], handles->control_points[2], 1e-9) &&
+            near((*moved)[3], handles->control_points[3], 1e-9) &&
+            (*moved)[0] == handles->control_points[0] &&
+            (*moved)[1] == handles->control_points[1],
+        "mapping a handle back onto itself must be identity and must not touch the other handle");
+    const auto moved_first = graph::control_points_from_handle_pointer(
+        handles->frame, handles->control_points, graph::HandleIndex::First,
+        view, rect, handles->first_handle.x, handles->first_handle.y);
+    suite.expect(
+        moved_first.has_value() &&
+            near((*moved_first)[0], handles->control_points[0], 1e-9) &&
+            near((*moved_first)[1], handles->control_points[1], 1e-9) &&
+            (*moved_first)[2] == handles->control_points[2] &&
+            (*moved_first)[3] == handles->control_points[3],
+        "handle 1 must round-trip and leave handle 2 byte-identical");
+
+    const auto flat_handles = graph::build_handle_geometry(
+        flat_track, flat_track.keys[0].identity, 0U, view, rect);
+    suite.expect(
+        flat_handles.has_value() && flat_handles->frame.flat_value_span,
+        "a flat segment must still expose handles");
+    if (flat_handles.has_value()) {
+        const auto flat_moved = graph::control_points_from_handle_pointer(
+            flat_handles->frame, flat_handles->control_points,
+            graph::HandleIndex::First, view, rect,
+            flat_handles->first_handle.x, flat_handles->first_handle.y);
+        suite.expect(
+            flat_moved.has_value() &&
+                near((*flat_moved)[0], flat_handles->control_points[0], 1e-9) &&
+                near((*flat_moved)[1], flat_handles->control_points[1], 1e-9),
+            "a flat segment's handle must round-trip through the fallback span");
+        // 100 logical pixels of upward travel is exactly cy = 1 by definition.
+        const auto flat_up = graph::control_points_from_handle_pointer(
+            flat_handles->frame, flat_handles->control_points,
+            graph::HandleIndex::First, view, rect,
+            flat_handles->first_handle.x,
+            graph::y_at_value(rect, view, flat_handles->frame.start_value) -
+                graph::kFlatSegmentHandlePixels);
+        suite.expect(
+            flat_up.has_value() && near((*flat_up)[1], 1.0, 1e-9),
+            "100 logical pixels above the start anchor must be exactly cy = 1");
+    }
+
+    // --- X clamp, Y overshoot. ---
+    const auto clamped_low = graph::control_points_from_handle_pointer(
+        handles->frame, handles->control_points, graph::HandleIndex::First,
+        view, rect, rect.min_x - 5000.0, handles->first_handle.y);
+    const auto clamped_high = graph::control_points_from_handle_pointer(
+        handles->frame, handles->control_points, graph::HandleIndex::First,
+        view, rect, rect.max_x + 5000.0, handles->first_handle.y);
+    suite.expect(
+        clamped_low.has_value() && (*clamped_low)[0] == 0.0 &&
+            clamped_high.has_value() && (*clamped_high)[0] == 1.0,
+        "a pointer past either end must clamp cx to exactly 0 or 1");
+    const auto overshoot_low = graph::control_points_from_handle_pointer(
+        handles->frame, handles->control_points, graph::HandleIndex::First,
+        view, rect, handles->first_handle.x,
+        graph::y_at_value(
+            rect, view, handles->frame.start_value - 2.5 * handles->frame.value_span));
+    suite.expect(
+        overshoot_low.has_value() && near((*overshoot_low)[1], -2.5, 1e-9),
+        "cy must accept finite negative overshoot without clamping");
+    const auto overshoot_high = graph::control_points_from_handle_pointer(
+        handles->frame, handles->control_points, graph::HandleIndex::Second,
+        view, rect, handles->second_handle.x,
+        graph::y_at_value(
+            rect, view, handles->frame.start_value + 3.75 * handles->frame.value_span));
+    suite.expect(
+        overshoot_high.has_value() && near((*overshoot_high)[3], 3.75, 1e-9),
+        "cy must accept finite positive overshoot without clamping");
+
+    // --- Non-finite and degenerate rejection. ---
+    graph::View broken_value = view;
+    broken_value.pixels_per_value = 0.0;
+    graph::View broken_time = view;
+    broken_time.pixels_per_second = 0.0;
+    suite.expect(
+        !graph::control_points_from_handle_pointer(
+             handles->frame, handles->control_points, graph::HandleIndex::First,
+             broken_value, rect, 300.0, 200.0).has_value() &&
+            !graph::control_points_from_handle_pointer(
+                 handles->frame, handles->control_points, graph::HandleIndex::First,
+                 broken_time, rect, 300.0, 200.0).has_value() &&
+            !graph::control_points_from_handle_pointer(
+                 handles->frame, handles->control_points, graph::HandleIndex::First,
+                 view, rect, std::numeric_limits<double>::quiet_NaN(), 200.0)
+                 .has_value() &&
+            !graph::control_points_from_handle_pointer(
+                 handles->frame, handles->control_points, graph::HandleIndex::First,
+                 view, rect, 300.0, std::numeric_limits<double>::infinity())
+                 .has_value(),
+        "a non-positive view scale or a non-finite pointer must reject the mapping");
+    graph::SegmentFrame degenerate_frame = handles->frame;
+    degenerate_frame.value_span = 0.0;
+    suite.expect(
+        !graph::control_points_from_handle_pointer(
+             degenerate_frame, handles->control_points, graph::HandleIndex::First,
+             view, rect, 300.0, 200.0).has_value(),
+        "a zero value span must reject the mapping");
+
+    // --- Hit test. ---
+    // Inclusivity is asserted against the exactly representable distance the
+    // offset actually produced, so double rounding of `x + 7.0` cannot decide
+    // the outcome instead of the `<=` in the implementation.
+    const double probe_x = handles->first_handle.x + 7.0;
+    const double probe_distance = std::abs(probe_x - handles->first_handle.x);
+    suite.expect(
+        graph::hit_test_handle(
+            *handles, probe_x, handles->first_handle.y, probe_distance).has_value() &&
+            !graph::hit_test_handle(
+                 *handles, probe_x, handles->first_handle.y,
+                 std::nextafter(probe_distance, 0.0)).has_value(),
+        "the handle hit test must be inclusive at exactly its radius");
+    suite.expect(
+        !graph::hit_test_handle(
+             *handles, handles->first_handle.x + 7.5, handles->first_handle.y, 7.0)
+             .has_value(),
+        "a pointer beyond the radius must miss every handle");
+    const auto first_hit = graph::hit_test_handle(
+        *handles, handles->first_handle.x, handles->first_handle.y, 7.0);
+    const auto second_hit = graph::hit_test_handle(
+        *handles, handles->second_handle.x, handles->second_handle.y, 7.0);
+    suite.expect(
+        first_hit.has_value() && first_hit->handle == graph::HandleIndex::First &&
+            first_hit->key == handles->key && second_hit.has_value() &&
+            second_hit->handle == graph::HandleIndex::Second,
+        "the handle hit test must return the nearer handle and the segment key");
+    // Exactly representable coordinates, so the tie really is a tie.
+    graph::HandleGeometry tie_geometry = *handles;
+    tie_geometry.first_handle = {300.0, 200.0};
+    tie_geometry.second_handle = {320.0, 200.0};
+    const auto tie = graph::hit_test_handle(tie_geometry, 310.0, 200.0, 32.0);
+    suite.expect(
+        tie.has_value() && tie->handle == graph::HandleIndex::First,
+        "an exact distance tie must resolve to the first handle");
+    suite.expect(
+        graph::hit_test_handle(tie_geometry, 318.0, 200.0, 32.0).has_value() &&
+            graph::hit_test_handle(tie_geometry, 318.0, 200.0, 32.0)->handle ==
+                graph::HandleIndex::Second,
+        "the nearer handle must win when the two distances differ");
+    suite.expect(
+        !graph::hit_test_handle(
+             *handles, std::numeric_limits<double>::quiet_NaN(),
+             handles->first_handle.y, 7.0).has_value() &&
+            !graph::hit_test_handle(
+                 *handles, handles->first_handle.x, handles->first_handle.y, -1.0)
+                 .has_value(),
+        "a non-finite pointer or a negative radius must hit nothing");
+}
+
 } // namespace
 
 int main() {
@@ -861,6 +1371,12 @@ int main() {
     });
     suite.run("nonfinite cubic control fails closed", [&] {
         test_nonfinite_cubic_control_fails_closed(suite);
+    });
+    suite.run("drag axis lock and unit mapping", [&] {
+        test_graph_drag_axis_and_unit_mapping(suite);
+    });
+    suite.run("handle geometry and pointer mapping", [&] {
+        test_graph_handle_geometry_and_pointer_mapping(suite);
     });
     return suite.finish();
 }

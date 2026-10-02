@@ -505,7 +505,7 @@ bool apply_preview_skin_selection(
     ShellState* state,
     std::string_view source,
     bool update_status_message) {
-    if (!state->load_result || !state->preview_skeleton) {
+    if (!state->load_result || !state->preview_skeleton()) {
         return false;
     }
 
@@ -639,8 +639,8 @@ bool apply_attachment_selection_to_preview_slot(
     std::string_view source,
     bool update_status_message,
     bool record_history) {
-    if (!state->load_result || !state->preview_skeleton ||
-        selection.slot_index >= state->preview_skeleton->slot_states().size()) {
+    if (!state->load_result || !state->preview_skeleton() ||
+        selection.slot_index >= state->preview_skeleton()->slot_states().size()) {
         return false;
     }
 
@@ -650,7 +650,7 @@ bool apply_attachment_selection_to_preview_slot(
 
     const auto apply_selection = [&]() {
         if (selection.slot_index >= state->preview_slot_overrides.size()) {
-            state->preview_slot_overrides.resize(state->preview_skeleton->slot_states().size());
+            state->preview_slot_overrides.resize(state->preview_skeleton()->slot_states().size());
         }
         state->preview_slot_overrides[selection.slot_index] = selection;
         select_attachment(state, selection, source, false);
@@ -699,14 +699,14 @@ bool reset_preview_slot_to_skin_selection(
     std::string_view source,
     bool update_status_message,
     bool record_history) {
-    if (!state->load_result || !state->preview_skeleton ||
-        slot_index >= state->preview_skeleton->slot_states().size()) {
+    if (!state->load_result || !state->preview_skeleton() ||
+        slot_index >= state->preview_skeleton()->slot_states().size()) {
         return false;
     }
 
     const auto reset_selection = [&]() {
         if (slot_index >= state->preview_slot_overrides.size()) {
-            state->preview_slot_overrides.resize(state->preview_skeleton->slot_states().size());
+            state->preview_slot_overrides.resize(state->preview_skeleton()->slot_states().size());
         }
         state->preview_slot_overrides[slot_index].reset();
         if (const auto preview_selection = current_attachment_selection(*state, slot_index)) {
@@ -863,12 +863,12 @@ std::optional<SlotAttachmentReference> resolve_attachment_reference(
 std::optional<PreviewAttachmentSelection> current_attachment_selection(
     const ShellState& state,
     std::size_t slot_index) {
-    if (!state.load_result || !state.preview_skeleton ||
-        slot_index >= state.preview_skeleton->slot_states().size()) {
+    if (!state.load_result || !state.preview_skeleton() ||
+        slot_index >= state.preview_skeleton()->slot_states().size()) {
         return std::nullopt;
     }
 
-    const auto& slot_state = state.preview_skeleton->slot_states()[slot_index];
+    const auto& slot_state = state.preview_skeleton()->slot_states()[slot_index];
     if (slot_state.attachment_name.empty()) {
         return std::nullopt;
     }
@@ -1133,7 +1133,7 @@ void draw_hierarchy_node(
 
     ImGui::PushID(bone.name.c_str());
     const bool inactive =
-        state->preview_skeleton && !state->preview_skeleton->is_bone_active(bone_index);
+        state->preview_skeleton() && !state->preview_skeleton()->is_bone_active(bone_index);
     const std::string display_name =
         bone.name + (inactive ? " (inactive)" : "");
 

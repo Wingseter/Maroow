@@ -1,4 +1,7 @@
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -19,7 +22,9 @@
 #include <shlobj.h>
 #endif
 
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/preferences.hpp"
+#include "marrow/editor/recent_projects.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/editor/session.hpp"
 #include "../editor/preferences_internal.hpp"
@@ -33,6 +38,13 @@ using marrow::editor::CurvePreset;
 using marrow::editor::EditorPreferences;
 using marrow::editor::PreferenceLoadStatus;
 using marrow::editor::PreferenceStore;
+using marrow::editor::curve_preset_definition;
+using marrow::editor::curve_preset_from_token;
+using marrow::editor::curve_preset_interpolation;
+using marrow::editor::curve_preset_of;
+using marrow::editor::kCurvePresets;
+using AnimationScalar = marrow::runtime::AnimationScalar;
+using InterpolationKind = marrow::runtime::InterpolationKind;
 
 class TestSuite {
 public:
@@ -925,6 +937,571 @@ void test_editor_session_isolation(TestSuite& suite) {
     expect_session_equal(suite, before, session);
 }
 
+
+// MAR-170: the six fixed presets. Every number is spelled out literally here
+// rather than read from `kCurvePresets`, because a test that reads the constant
+// it checks proves nothing.
+struct ExpectedPreset {
+    CurvePreset preset;
+    const char* token;
+    const char* display;
+    InterpolationKind kind;
+    double cx1;
+    double cy1;
+    double cx2;
+    double cy2;
+};
+
+const std::vector<ExpectedPreset>& expected_presets() {
+    static const std::vector<ExpectedPreset> presets{
+        {CurvePreset::Linear, "linear", "Linear",
+         InterpolationKind::Linear, 0.0, 0.0, 0.0, 0.0},
+        {CurvePreset::Stepped, "stepped", "Stepped",
+         InterpolationKind::Stepped, 0.0, 0.0, 0.0, 0.0},
+        {CurvePreset::Ease, "ease", "Ease",
+         InterpolationKind::CubicBezier, 0.25, 0.1, 0.25, 1.0},
+        {CurvePreset::EaseIn, "ease_in", "Ease-In",
+         InterpolationKind::CubicBezier, 0.42, 0.0, 1.0, 1.0},
+        {CurvePreset::EaseOut, "ease_out", "Ease-Out",
+         InterpolationKind::CubicBezier, 0.0, 0.0, 0.58, 1.0},
+        {CurvePreset::EaseInOut, "ease_in_out", "Ease-In-Out",
+         InterpolationKind::CubicBezier, 0.42, 0.0, 0.58, 1.0},
+    };
+    return presets;
+}
+
+// MAR-170: the exact call sequence `load_shell_preferences()` and
+// `set_shell_default_curve()` perform. Those two functions take a `ShellState`,
+// which lives in the `marrow_editor_shell` target rather than in
+// `marrow_editor`, so this case drives a default-constructed `PreferenceStore`
+// through `MARROW_CONFIG_HOME` — the same resolution the shell gets — and the
+// `ShellState`-level wiring is covered by the shell smoke. Do not "fix" this
+// split by linking the shell into a unit test.
+void test_shell_preference_session(TestSuite& suite) {
+    ScopedPreferenceEnvironment environment;
+    TemporaryDirectory temporary("shell-session");
+    environment.set("MARROW_CONFIG_HOME", temporary.path().string());
+    const fs::path settings_path = temporary.path() / "editor-settings.json";
+
+    {
+        const PreferenceStore store;
+        suite.expect(store.settings_path() == settings_path,
+                     "an isolated config home should resolve the shell settings path");
+        const auto first = store.load();
+        suite.expect(first.status == PreferenceLoadStatus::FirstRun,
+                     "a fresh config home should report a first run");
+        expect_default_preferences(suite, first.preferences, "a first-run shell load");
+        suite.expect(!fs::exists(settings_path),
+                     "loading preferences must never create a settings file");
+    }
+
+    // set_shell_default_curve(): mutate the LOADED preferences and save them, so
+    // recent_projects and unknown additive fields survive.
+    {
+        const PreferenceStore store;
+        EditorPreferences preferences = store.load().preferences;
+        preferences.default_curve = CurvePreset::EaseOut;
+        suite.expect(static_cast<bool>(store.save(preferences)),
+                     "storing a new default curve should succeed");
+        const auto reloaded = store.load();
+        suite.expect(reloaded.status == PreferenceLoadStatus::Loaded &&
+                         reloaded.preferences.default_curve == CurvePreset::EaseOut,
+                     "a stored default curve should reload as itself");
+    }
+
+    // Preservation: an unknown additive field and a non-empty recent list must
+    // survive a default-only change.
+    {
+        write_text(
+            settings_path,
+            "{\n  \"version\": 1,\n  \"default_curve\": \"ease\",\n"
+            "  \"recent_projects\": [\"one.marrow\", \"two.marrow\"],\n"
+            "  \"future_field\": {\"kept\": 7}\n}\n");
+        const PreferenceStore store;
+        const auto loaded = store.load();
+        suite.expect(loaded.preferences.default_curve == CurvePreset::Ease,
+                     "the preserved-field case should start from the ease preset");
+        EditorPreferences preferences = loaded.preferences;
+        preferences.default_curve = CurvePreset::Stepped;
+        suite.expect(static_cast<bool>(store.save(preferences)),
+                     "saving a default-only change should succeed");
+        const auto parsed = json::load_document(settings_path);
+        suite.expect(static_cast<bool>(parsed), "the rewritten settings should be JSON");
+        if (parsed) {
+            const json::Value* future =
+                json::find_member(parsed.document->root, "future_field");
+            const json::Value* kept =
+                future != nullptr ? json::find_member(*future, "kept") : nullptr;
+            suite.expect(kept != nullptr && kept->is_number() && kept->as_number() == 7.0,
+                         "an unknown additive field must survive a default change");
+        }
+        const auto after = store.load();
+        suite.expect(after.preferences.default_curve == CurvePreset::Stepped,
+                     "the new default should be the one that was stored");
+        suite.expect(after.preferences.recent_projects ==
+                         std::vector<fs::path>{"one.marrow", "two.marrow"},
+                     "recent projects must survive a default-only change");
+    }
+
+    // Malformed bytes fall back to Linear and are left exactly as found.
+    {
+        const std::string malformed = "{ this is not json";
+        write_text(settings_path, malformed);
+        const PreferenceStore store;
+        const auto loaded = store.load();
+        suite.expect(loaded.status == PreferenceLoadStatus::Malformed,
+                     "malformed settings should report Malformed");
+        expect_default_preferences(suite, loaded.preferences, "a malformed shell load");
+        suite.expect(read_text(settings_path) == malformed,
+                     "loading must never repair a malformed settings file");
+    }
+
+    // A future version is refused by save() and survives byte-for-byte.
+    {
+        const std::string future =
+            "{\n  \"version\": 2,\n  \"default_curve\": \"ease_in\"\n}\n";
+        write_text(settings_path, future);
+        const PreferenceStore store;
+        const auto loaded = store.load();
+        suite.expect(loaded.status == PreferenceLoadStatus::UnsupportedVersion,
+                     "a newer settings version should report UnsupportedVersion");
+        expect_default_preferences(
+            suite, loaded.preferences, "an unsupported-version shell load");
+        EditorPreferences preferences = loaded.preferences;
+        preferences.default_curve = CurvePreset::EaseInOut;
+        const auto saved = store.save(preferences);
+        suite.expect(!saved && !saved.error.empty(),
+                     "saving over an unsupported future version must be refused");
+        suite.expect(read_text(settings_path) == future,
+                     "a refused save must preserve the future file byte-for-byte");
+    }
+}
+
+void test_curve_preset_constants(TestSuite& suite) {
+    const std::vector<ExpectedPreset>& expected = expected_presets();
+    suite.expect(kCurvePresets.size() == expected.size(),
+                 "there must be exactly six fixed curve presets");
+    if (kCurvePresets.size() != expected.size()) return;
+
+    for (std::size_t index = 0U; index < expected.size(); ++index) {
+        const ExpectedPreset& want = expected[index];
+        const auto& got = kCurvePresets[index];
+        suite.expect(got.preset == want.preset && got.token == want.token &&
+                         got.display_name == want.display && got.kind == want.kind &&
+                         got.control_points[0] == want.cx1 &&
+                         got.control_points[1] == want.cy1 &&
+                         got.control_points[2] == want.cx2 &&
+                         got.control_points[3] == want.cy2,
+                     std::string("preset ") + want.token +
+                         " must match its fixed definition");
+        suite.expect(&curve_preset_definition(want.preset) == &got,
+                     std::string("curve_preset_definition must index ") + want.token);
+        suite.expect(curve_preset_from_token(want.token) ==
+                         std::optional<CurvePreset>(want.preset),
+                     std::string("token ") + want.token + " must parse to its preset");
+
+        // The format invariant both loaders enforce, as double and after the
+        // float32 narrowing CubicBezierControlPoints performs on store.
+        if (want.kind == InterpolationKind::CubicBezier) {
+            const double nx1 = static_cast<double>(static_cast<AnimationScalar>(want.cx1));
+            const double nx2 = static_cast<double>(static_cast<AnimationScalar>(want.cx2));
+            suite.expect(want.cx1 >= 0.0 && want.cx1 <= 1.0 && want.cx2 >= 0.0 &&
+                             want.cx2 <= 1.0 && nx1 >= 0.0 && nx1 <= 1.0 &&
+                             nx2 >= 0.0 && nx2 <= 1.0,
+                         std::string("preset ") + want.token +
+                             " must keep cx inside [0, 1] before and after narrowing");
+            // No preset may overshoot: 0 <= cy1 <= cy2 <= 1.
+            suite.expect(want.cy1 >= 0.0 && want.cy1 <= want.cy2 && want.cy2 <= 1.0,
+                         std::string("preset ") + want.token +
+                             " must keep cy monotone inside [0, 1]");
+            // X monotonicity needs cx2 >= cx1 for the runtime inverse solve.
+            suite.expect(want.cx2 >= want.cx1,
+                         std::string("preset ") + want.token +
+                             " must keep cx2 >= cx1 so X(t) is non-decreasing");
+        }
+
+        const auto interpolation = curve_preset_interpolation(want.preset);
+        suite.expect(interpolation.kind() == want.kind,
+                     std::string("preset ") + want.token +
+                         " must build its declared interpolation kind");
+        if (want.kind == InterpolationKind::CubicBezier) {
+            const auto& points = interpolation.cubic_bezier();
+            suite.expect(points.cx1 == static_cast<AnimationScalar>(want.cx1) &&
+                             points.cy1 == static_cast<AnimationScalar>(want.cy1) &&
+                             points.cx2 == static_cast<AnimationScalar>(want.cx2) &&
+                             points.cy2 == static_cast<AnimationScalar>(want.cy2),
+                         std::string("preset ") + want.token +
+                             " must store the narrowed literal control points");
+        }
+        suite.expect(curve_preset_of(interpolation) ==
+                         std::optional<CurvePreset>(want.preset),
+                     std::string("preset ") + want.token + " must read back as itself");
+    }
+
+    // Custom curves and MAR-169's conversion seed are not presets.
+    suite.expect(!curve_preset_of(marrow::runtime::Interpolation::cubic_bezier(
+                                      0.2, -0.4, 0.8, 1.6))
+                      .has_value(),
+                 "an overshoot curve must not be reported as a preset");
+    suite.expect(!curve_preset_of(marrow::runtime::Interpolation::cubic_bezier(
+                                      1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 2.0 / 3.0))
+                      .has_value(),
+                 "MAR-169's linear-equivalent conversion seed is not a preset");
+    // One ULP away from Ease must not read as Ease: the comparison is exact.
+    {
+        const auto ease = curve_preset_interpolation(CurvePreset::Ease);
+        const AnimationScalar nudged =
+            std::nextafter(ease.cubic_bezier().cy1, static_cast<AnimationScalar>(1.0));
+        suite.expect(!curve_preset_of(marrow::runtime::Interpolation::cubic_bezier(
+                                          static_cast<double>(ease.cubic_bezier().cx1),
+                                          static_cast<double>(nudged),
+                                          static_cast<double>(ease.cubic_bezier().cx2),
+                                          static_cast<double>(ease.cubic_bezier().cy2)))
+                          .has_value(),
+                     "a curve one ULP away from Ease must read as Custom");
+    }
+    suite.expect(!curve_preset_from_token("ease-in").has_value() &&
+                     !curve_preset_from_token("easeIn").has_value() &&
+                     !curve_preset_from_token("bounce").has_value() &&
+                     !curve_preset_from_token("").has_value(),
+                 "only the six snake_case tokens are accepted");
+
+    // Runtime well-posedness of every cubic preset, including Ease-In's
+    // X'(1) = 0 degenerate right endpoint.
+    for (const ExpectedPreset& want : expected) {
+        if (want.kind != InterpolationKind::CubicBezier) continue;
+        const auto curve = curve_preset_interpolation(want.preset);
+        double previous = curve.transform(0.0);
+        bool ok = previous == 0.0;
+        for (int step = 1; step <= 100; ++step) {
+            const double alpha = static_cast<double>(step) / 100.0;
+            const double value = curve.transform(alpha);
+            ok = ok && std::isfinite(value) && value >= previous - 1e-6 &&
+                value >= -1e-6 && value <= 1.0 + 1e-6;
+            previous = value;
+        }
+        ok = ok && std::abs(curve.transform(1.0) - 1.0) < 1e-6;
+        suite.expect(ok,
+                     std::string("preset ") + want.token +
+                         " must evaluate finite, monotone, and overshoot-free on [0, 1]");
+    }
+}
+
+// Keeps `authoring.hpp`'s table and `preferences.cpp`'s private token list in
+// agreement without refactoring either: the settings file is the only shared
+// contract, so a file written with a table token must load back to that preset.
+void test_curve_preset_tokens_match_settings_tokens(TestSuite& suite) {
+    TemporaryDirectory temporary("preset-tokens");
+    const fs::path settings_path = temporary.path() / "editor-settings.json";
+    PreferenceStore store(settings_path);
+
+    for (const auto& entry : kCurvePresets) {
+        const std::string token(entry.token);
+        write_text(
+            settings_path,
+            "{\n  \"version\": 1,\n  \"default_curve\": \"" + token +
+                "\",\n  \"recent_projects\": []\n}\n");
+        const auto loaded = store.load();
+        suite.expect(loaded.status == PreferenceLoadStatus::Loaded,
+                     "a settings file carrying token " + token + " should load cleanly");
+        suite.expect(
+            std::optional<CurvePreset>(loaded.preferences.default_curve) ==
+                curve_preset_from_token(token),
+            "settings token " + token + " must resolve to the same preset the table names");
+        suite.expect(loaded.preferences.default_curve == entry.preset,
+                     "settings token " + token + " must resolve to its table entry");
+    }
+}
+
+// MAR-183: the recent-project list algebra, plus one isolated store round trip.
+//
+// The algebra lives in `marrow_editor` (`recent_projects.cpp`) precisely so this
+// binary can reach it without linking the shell. See the note above
+// `test_shell_preference_session`: do not "fix" that split.
+//
+// The store layer itself is NOT retested here -- MAR-156 shipped
+// `recent_projects` inside settings version 1, and the four cases above already
+// cover its parse, its fallbacks and its additive preservation. This case covers
+// only what MAR-183 adds: canonicalization, MRU ordering, de-duplication,
+// eviction at the bound, and the changed-bool every persist decision is keyed on.
+void test_recent_project_list_algebra(TestSuite& suite) {
+    using marrow::editor::canonical_recent_path;
+    using marrow::editor::drop_missing_recent_paths;
+    using marrow::editor::forget_recent_path;
+    using marrow::editor::kRecentProjectLimit;
+    using marrow::editor::normalize_recent_paths;
+    using marrow::editor::promote_recent_project;
+    using marrow::editor::recent_project_exists;
+
+    // (1) M4 gate. Printed EVERY run: design 2.3 specifies a fallback chain that
+    // only runs if `weakly_canonical` errors on a missing path, and which branch
+    // ran is a platform fact, not an assumption.
+    {
+        const fs::path missing =
+            fs::temp_directory_path() / "mar183-does-not-exist" / "x.marrow";
+        const fs::path canonical_missing = canonical_recent_path(missing);
+        std::cout << "  MAR-183 M4 measured: canonical_recent_path(missing) -> '"
+                  << canonical_missing.string() << "' absolute="
+                  << canonical_missing.is_absolute() << '\n';
+        suite.expect(!canonical_missing.empty(),
+                     "canonicalizing a missing path must return something");
+        suite.expect(canonical_missing.is_absolute(),
+                     "canonicalizing a missing path must still absolutize it -- an "
+                     "entry must outlive its file (AC4)");
+        suite.expect(canonical_recent_path(fs::path{}).empty(),
+                     "canonicalizing an empty path must return empty, not the CWD");
+    }
+
+    // (2) Canonicalization of a relative path, and agreement with its own
+    // absolute spelling. ShellState::project_path defaults to a RELATIVE path,
+    // so this is load-bearing rather than cosmetic.
+    const fs::path relative = "assets/fixtures/player_idle.marrow";
+    const fs::path canonical_relative = canonical_recent_path(relative);
+    std::cout << "  MAR-183 M4 measured: canonical_recent_path(relative existing) -> '"
+              << canonical_relative.string() << "'\n";
+    suite.expect(canonical_relative.is_absolute(),
+                 "a relative recent path must canonicalize to an absolute one");
+    suite.expect(canonical_recent_path(fs::absolute(relative)) == canonical_relative,
+                 "the relative and absolute spellings of one file must canonicalize equal");
+
+    // (3) Dedup across spellings. (I6)
+    {
+        std::vector<fs::path> list;
+        suite.expect(promote_recent_project(&list, relative),
+                     "promoting into an empty list must report a change");
+        suite.expect(promote_recent_project(&list, fs::absolute(relative)) == false,
+                     "re-promoting the head under a different spelling must be a no-op");
+        suite.expect(list.size() == 1,
+                     "two spellings of one file must collapse to exactly one entry, got " +
+                         std::to_string(list.size()));
+        suite.expect(list.front() == canonical_relative,
+                     "the surviving entry must be the canonical form");
+    }
+
+    // (4)(5) MRU ordering, and promotion rather than duplication.
+    const fs::path a = canonical_recent_path("/tmp/mar183/a.marrow");
+    const fs::path b = canonical_recent_path("/tmp/mar183/b.marrow");
+    const fs::path c = canonical_recent_path("/tmp/mar183/c.marrow");
+    {
+        std::vector<fs::path> list;
+        (void)promote_recent_project(&list, a);
+        (void)promote_recent_project(&list, b);
+        (void)promote_recent_project(&list, c);
+        suite.expect(list == std::vector<fs::path>{c, b, a},
+                     "promotion must order most-recent-first");
+        suite.expect(promote_recent_project(&list, a),
+                     "promoting a non-head existing entry must report a change");
+        suite.expect(list == std::vector<fs::path>{a, c, b},
+                     "re-promoting an existing entry must move it to the head, not duplicate it");
+        suite.expect(list.size() == 3,
+                     "re-promotion must not grow the list, got " +
+                         std::to_string(list.size()));
+    }
+
+    // (6) Eviction at exactly the bound, insert-before-truncate. (I7)
+    {
+        std::vector<fs::path> list;
+        std::vector<fs::path> ordered;
+        for (int index = 1; index <= 12; ++index) {
+            const fs::path entry = canonical_recent_path(
+                fs::path("/tmp/mar183/p") / (std::to_string(index) + ".marrow"));
+            ordered.push_back(entry);
+            (void)promote_recent_project(&list, entry);
+            // The bound is an INVARIANT, checked after EVERY promotion. A cap
+            // comparison that is off by one leaves the list one over the bound
+            // on odd promotions and corrects itself on even ones, so sampling
+            // only the final size tests the single parity that hides the bug.
+            suite.expect(list.size() <= kRecentProjectLimit,
+                         "the list must NEVER exceed kRecentProjectLimit -- after "
+                         "promotion " + std::to_string(index) + " it held " +
+                             std::to_string(list.size()));
+        }
+        suite.expect(list.size() == kRecentProjectLimit,
+                     "twelve promotions must leave exactly kRecentProjectLimit entries, got " +
+                         std::to_string(list.size()));
+        suite.expect(list.front() == ordered[11],
+                     "the newest promotion must be at the head, never the evicted one");
+        suite.expect(list.back() == ordered[2],
+                     "eviction must drop from the TAIL: the oldest survivor must be p3");
+        suite.expect(std::find(list.begin(), list.end(), ordered[0]) == list.end(),
+                     "p1 must have been evicted");
+        suite.expect(std::find(list.begin(), list.end(), ordered[1]) == list.end(),
+                     "p2 must have been evicted");
+    }
+
+    // (7) The changed-bool in both polarities. This is the precondition for the
+    // no-op skip in `persist_recent_projects` (I12): a false that is really true
+    // would suppress a needed write, and a true that is really false would
+    // rewrite the settings file on every frame.
+    {
+        std::vector<fs::path> list;
+        suite.expect(promote_recent_project(&list, a),
+                     "a new promotion must return true");
+        const std::vector<fs::path> before = list;
+        suite.expect(promote_recent_project(&list, a) == false,
+                     "re-promoting the CURRENT HEAD must return false");
+        suite.expect(list == before,
+                     "a no-op promotion must leave the list element-wise equal");
+        suite.expect(forget_recent_path(&list, b) == false,
+                     "forgetting an absent path must return false");
+        suite.expect(promote_recent_project(&list, fs::path{}) == false,
+                     "promoting an empty path must return false and store nothing");
+        suite.expect(list.size() == 1,
+                     "an empty promotion must not grow the list");
+        suite.expect(forget_recent_path(&list, a),
+                     "forgetting a present path must return true");
+        suite.expect(list.empty(), "forgetting the only entry must empty the list");
+    }
+
+    // (8) normalize_recent_paths: canonicalize, drop empties, keep the FIRST of
+    // each duplicate group, cap -- and be idempotent.
+    {
+        // The duplicate pair is deliberately NON-ADJACENT, with two unrelated
+        // entries between the two spellings. Adjacent -- or adjacent at the
+        // front -- keep-first and keep-last collapse to the same index and a
+        // keep-the-last dedup passes every assertion below.
+        std::vector<fs::path> list{fs::path{}, relative, "/tmp/mar183/c.marrow",
+                                   "/tmp/mar183/d.marrow", fs::absolute(relative)};
+        for (int index = 1; index <= 15; ++index) {
+            list.emplace_back(fs::path("/tmp/mar183/n") /
+                              (std::to_string(index) + ".marrow"));
+        }
+        suite.expect(normalize_recent_paths(&list),
+                     "normalizing a list with an empty entry and a duplicate must report a change");
+        suite.expect(list.size() == kRecentProjectLimit,
+                     "normalize must cap at kRecentProjectLimit, got " +
+                         std::to_string(list.size()));
+        suite.expect(std::find(list.begin(), list.end(), fs::path{}) == list.end(),
+                     "normalize must drop empty entries");
+        suite.expect(std::count(list.begin(), list.end(), canonical_relative) == 1,
+                     "the two spellings must have collapsed to one entry");
+        // INDEX 0, not merely "present". Keeping the LAST occurrence would put
+        // the survivor at index 2, after the two entries that separated the
+        // pair, silently reordering a list the user has already seen.
+        suite.expect(list.front() == canonical_relative,
+                     "dedup must keep the FIRST occurrence AT ITS ORIGINAL INDEX 0");
+        suite.expect(list[1] == c && list[2] == canonical_recent_path("/tmp/mar183/d.marrow"),
+                     "the entries that separated the duplicate pair must keep their "
+                     "positions behind the survivor");
+        const std::vector<fs::path> normalized = list;
+        suite.expect(normalize_recent_paths(&list) == false,
+                     "normalize must be idempotent: a second call must report no change");
+        suite.expect(list == normalized,
+                     "a second normalize must leave the list element-wise equal");
+    }
+
+    // (9) A missing path survives normalize. This is the load half of I5: an
+    // entry on an unmounted volume must never be destroyed by merely loading.
+    {
+        const fs::path gone = fs::temp_directory_path() / "mar183-gone" / "gone.marrow";
+        std::vector<fs::path> list{gone};
+        (void)normalize_recent_paths(&list);
+        suite.expect(list.size() == 1 && list.front() == canonical_recent_path(gone),
+                     "normalize must KEEP an entry whose file does not exist");
+        suite.expect(recent_project_exists(gone) == false,
+                     "recent_project_exists must be false for a missing file");
+    }
+
+    // (10) drop_missing_recent_paths over a real directory.
+    {
+        TemporaryDirectory temporary("recent-missing");
+        const fs::path present_one = temporary.path() / "one.marrow";
+        const fs::path present_two = temporary.path() / "two.marrow";
+        write_text(present_one, "{}\n");
+        write_text(present_two, "{}\n");
+        const fs::path gone_one = temporary.path() / "gone-one.marrow";
+        const fs::path gone_two = temporary.path() / "gone-two.marrow";
+        suite.expect(recent_project_exists(present_one),
+                     "recent_project_exists must be true for a real file");
+        suite.expect(recent_project_exists(temporary.path()) == false,
+                     "a DIRECTORY is not a recent project: is_regular_file, not exists");
+
+        std::vector<fs::path> list{present_one, gone_one, present_two, gone_two};
+        (void)normalize_recent_paths(&list);
+        suite.expect(drop_missing_recent_paths(&list),
+                     "dropping missing entries from a list containing two must return true");
+        suite.expect(list == std::vector<fs::path>{canonical_recent_path(present_one),
+                                                   canonical_recent_path(present_two)},
+                     "exactly the missing entries must be dropped, and the present pair "
+                     "must keep its relative order");
+        suite.expect(drop_missing_recent_paths(&list) == false,
+                     "a second drop over an all-present list must return false");
+    }
+
+    // (11) The macOS case-identity boundary, MEASURED rather than assumed.
+    //
+    // Design 2.2 and 10.1 state that `/x/A.marrow` and `/x/a.marrow` produce TWO
+    // entries on a case-insensitive volume. That is only half true, and the half
+    // it gets wrong is the common one: `weakly_canonical` resolves its longest
+    // EXISTING prefix through the filesystem, so on macOS both spellings of a
+    // file that EXISTS canonicalize to the on-disk spelling and collapse into one
+    // entry. Only when the file is MISSING does the lexical remainder survive
+    // verbatim and leave two. Both branches are asserted, and printed, so the
+    // behaviour cannot change under us silently.
+    {
+        TemporaryDirectory temporary("recent-case");
+        const fs::path upper_present = temporary.path() / "A.marrow";
+        write_text(upper_present, "{}\n");
+        const fs::path lower_present = temporary.path() / "a.marrow";
+        const bool present_collapse =
+            canonical_recent_path(upper_present) == canonical_recent_path(lower_present);
+
+        const fs::path upper_missing = temporary.path() / "GONE.marrow";
+        const fs::path lower_missing = temporary.path() / "gone.marrow";
+        const bool missing_collapse =
+            canonical_recent_path(upper_missing) == canonical_recent_path(lower_missing);
+
+        std::cout << "  MAR-183 case identity measured: existing-file spellings collapse="
+                  << present_collapse << " missing-file spellings collapse="
+                  << missing_collapse << '\n';
+        suite.expect(missing_collapse == false,
+                     "two case-variant spellings of a MISSING file must stay distinct: "
+                     "the identity rule folds no case of its own");
+        std::vector<fs::path> list{upper_missing, lower_missing};
+        (void)normalize_recent_paths(&list);
+        suite.expect(list.size() == 2,
+                     "the two missing spellings must survive normalize as two entries");
+    }
+
+    // (12) Store round trip, isolated. The list the shell will write must survive
+    // the real serializer, and `default_curve` must survive alongside it.
+    {
+        ScopedPreferenceEnvironment environment;
+        TemporaryDirectory temporary("recent-round-trip");
+        environment.set("MARROW_CONFIG_HOME", temporary.path().string());
+
+        std::vector<fs::path> list;
+        for (int index = 1; index <= 12; ++index) {
+            (void)promote_recent_project(
+                &list,
+                canonical_recent_path(temporary.path() /
+                                      ("r" + std::to_string(index) + ".marrow")));
+        }
+        suite.expect(list.size() == kRecentProjectLimit,
+                     "the round-trip fixture must be exactly at the bound");
+
+        EditorPreferences preferences;
+        preferences.default_curve = CurvePreset::EaseOut;
+        preferences.recent_projects = list;
+        const PreferenceStore store;
+        const auto saved = store.save(preferences);
+        suite.expect(static_cast<bool>(saved),
+                     "saving a normalized recent list must succeed");
+
+        const auto loaded = store.load();
+        suite.expect(loaded.status == PreferenceLoadStatus::Loaded,
+                     "a settings file this feature wrote must reload as Loaded");
+        suite.expect(loaded.preferences.recent_projects == list,
+                     "the recent list must round-trip element-wise equal");
+        suite.expect(loaded.preferences.default_curve == CurvePreset::EaseOut,
+                     "default_curve must survive a recent-list write");
+
+        std::vector<fs::path> reloaded = loaded.preferences.recent_projects;
+        suite.expect(normalize_recent_paths(&reloaded) == false,
+                     "a list that was normalized before the write must reload already normalized");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -952,6 +1529,18 @@ int main() {
     });
     suite.run("PreferenceStore remains isolated from EditorSession", [&] {
         test_editor_session_isolation(suite);
+    });
+    suite.run("fixed curve preset constants, identity, and well-posedness", [&] {
+        test_curve_preset_constants(suite);
+    });
+    suite.run("preset tokens agree with the settings-file vocabulary", [&] {
+        test_curve_preset_tokens_match_settings_tokens(suite);
+    });
+    suite.run("shell preference session load, save, fallback, and preservation", [&] {
+        test_shell_preference_session(suite);
+    });
+    suite.run("recent project list algebra and isolated round trip", [&] {
+        test_recent_project_list_algebra(suite);
     });
     return suite.finish();
 }

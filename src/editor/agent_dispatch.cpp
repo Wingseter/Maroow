@@ -12,8 +12,10 @@
 #include <vector>
 
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/psd_reimport_commit.hpp"
 #include "marrow/editor/session.hpp"
 #include "agent_dispatch_internal.hpp"
+#include "marrow/editor/authoring.hpp"
 
 namespace marrow::editor {
 
@@ -57,6 +59,10 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"animation.delete", "edit", true, false, true, true, &handle_editing_operation},
     {"animation.set_duration", "edit", true, false, true, true, &handle_editing_operation},
     {"timeline.retime_keyframes", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.set_interpolation", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.set_curve_mode", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.set_loop_sync", "edit", true, false, true, true, &handle_editing_operation},
+    {"timeline.scale_key_times", "edit", true, false, true, true, &handle_editing_operation},
     {"set_transform", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_transform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_event_keyframe", "edit", true, false, true, true, &handle_editing_operation},
@@ -65,14 +71,23 @@ constexpr OperationSpec kOperationSpecs[] = {
     {"remove_deform_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_vertex_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"normalize_weights", "edit", true, false, true, true, &handle_editing_operation},
+    {"mesh.rebind_weights", "edit", true, false, true, true, &handle_editing_operation},
+    {"mesh.generate_weights", "edit", true, false, true, true, &handle_editing_operation},
     {"edit_ik_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_path_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_transform_constraint", "edit", true, false, true, true, &handle_constraint_operation},
     {"edit_physics_constraint", "edit", true, false, true, true, &handle_constraint_operation},
+    {"constraint.rename", "edit", true, false, true, true, &handle_constraint_operation},
+    {"constraint.delete", "edit", true, false, true, true, &handle_constraint_operation},
     {"set_slot_color_keyframe", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_slot_color_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_attachment_keyframe", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_attachment_keyframe", "edit", true, false, false, true, &handle_editing_operation},
+    // MAR-185. `dry_run_supported` mirrors the family exactly: every
+    // `set_*_keyframe` supports a dry run, every `remove_*_keyframe` does not.
+    // The dispatcher ENFORCES the flag, so it is behaviour, not documentation.
+    {"set_inherit_keyframe", "edit", true, false, true, true, &handle_editing_operation},
+    {"remove_inherit_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"set_draw_order_keyframe", "edit", true, false, true, true, &handle_editing_operation},
     {"remove_draw_order_keyframe", "edit", true, false, false, true, &handle_editing_operation},
     {"save", "management", true, true, false, true, &handle_management_operation},
@@ -284,6 +299,198 @@ std::optional<marrow::runtime::Interpolation> interpolation_arg(
         coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
 }
 
+bool timeline_lane_selectors_arg(
+    const json::Value& args,
+    std::vector<marrow::editor::TimelineLaneSelector>* lanes_out,
+    std::string* error_out) {
+    const json::Value* lanes_value = json::find_member(args, "lanes");
+    if (lanes_value == nullptr || !lanes_value->is_array() ||
+        lanes_value->as_array().empty()) {
+        *error_out = "timeline.set_loop_sync requires a non-empty lanes(array).";
+        return false;
+    }
+    if (lanes_value->as_array().size() > 4096U) {
+        *error_out = "timeline.set_loop_sync accepts at most 4096 lanes.";
+        return false;
+    }
+    lanes_out->clear();
+    lanes_out->reserve(lanes_value->as_array().size());
+    for (std::size_t index = 0U; index < lanes_value->as_array().size(); ++index) {
+        const json::Value& lane_value = lanes_value->as_array()[index];
+        if (!lane_value.is_object()) {
+            *error_out = "timeline.set_loop_sync lane " + std::to_string(index) +
+                " must be an object.";
+            return false;
+        }
+        const auto kind = string_arg_any(lane_value, {"kind", "type"});
+        const auto animation = string_arg(lane_value, "animation");
+        if (!kind.has_value() || !animation.has_value()) {
+            *error_out = "timeline.set_loop_sync lane " + std::to_string(index) +
+                " requires kind and animation.";
+            return false;
+        }
+        marrow::editor::TimelineLaneSelector lane;
+        lane.animation_name = std::string(*animation);
+        if (*kind == "transform") {
+            const auto bone = string_arg(lane_value, "bone");
+            const auto channel = string_arg(lane_value, "channel");
+            if (!bone.has_value() || !channel.has_value()) {
+                *error_out = "Transform loop-sync lanes require bone and channel.";
+                return false;
+            }
+            lane.kind = marrow::editor::TimelineLaneKind::Transform;
+            lane.bone_name = std::string(*bone);
+            if (*channel == "rotate") {
+                lane.transform_channel = TransformTimelineChannel::Rotate;
+            } else if (*channel == "translate") {
+                lane.transform_channel = TransformTimelineChannel::Translate;
+            } else if (*channel == "scale") {
+                lane.transform_channel = TransformTimelineChannel::Scale;
+            } else if (*channel == "shear") {
+                lane.transform_channel = TransformTimelineChannel::Shear;
+            } else {
+                *error_out =
+                    "Transform loop-sync channel must be rotate, translate, scale, "
+                    "or shear.";
+                return false;
+            }
+        } else if (*kind == "slot_color") {
+            const auto slot = string_arg(lane_value, "slot");
+            if (!slot.has_value()) {
+                *error_out = "Slot-colour loop-sync lanes require slot.";
+                return false;
+            }
+            lane.kind = marrow::editor::TimelineLaneKind::SlotColor;
+            lane.slot_name = std::string(*slot);
+        } else if (*kind == "deform") {
+            const auto slot = string_arg(lane_value, "slot");
+            const auto attachment = string_arg(lane_value, "attachment");
+            if (!slot.has_value() || !attachment.has_value()) {
+                *error_out = "Deform loop-sync lanes require slot and attachment.";
+                return false;
+            }
+            lane.kind = marrow::editor::TimelineLaneKind::Deform;
+            lane.slot_name = std::string(*slot);
+            lane.attachment_name = std::string(*attachment);
+        } else if (*kind == "draw_order" || *kind == "event" ||
+                   *kind == "slot_attachment" || *kind == "inherit") {
+            // Rejected rather than ignored: those families are piecewise
+            // constant and already wrap without a pop, and an event key at the
+            // boundary would fire twice per loop.
+            //
+            // MAR-185 adds `inherit` HERE, the third of three sibling parsers
+            // that needed it. The lane was rejected either way; what was wrong
+            // was the MESSAGE -- it fell through to "Unknown timeline loop-sync
+            // lane kind: inherit", a false statement about the vocabulary once
+            // inherit is a real kind.
+            *error_out = "timeline.set_loop_sync does not support " +
+                std::string(*kind) +
+                " lanes: they are piecewise constant and need no boundary key.";
+            return false;
+        } else {
+            *error_out = "Unknown timeline loop-sync lane kind: " + std::string(*kind);
+            return false;
+        }
+        lanes_out->push_back(std::move(lane));
+    }
+    return true;
+}
+
+bool curve_mode_request_arg(
+    const json::Value& args,
+    marrow::editor::TimelineCurveMode* mode_out,
+    std::optional<marrow::editor::TimelineScalarComponent>* driver_out,
+    std::string* error_out) {
+    const json::Value* mode_value = json::find_member(args, "mode");
+    if (mode_value == nullptr || !mode_value->is_string()) {
+        *error_out = "mode is required and must be 'manual' or 'auto'.";
+        return false;
+    }
+    const auto mode = marrow::editor::curve_mode_from_token(mode_value->as_string());
+    if (!mode.has_value()) {
+        *error_out = "mode is required and must be 'manual' or 'auto'.";
+        return false;
+    }
+    *mode_out = *mode;
+    *driver_out = std::nullopt;
+
+    const json::Value* driver_value = json::find_member(args, "driver");
+    if (driver_value == nullptr || driver_value->is_null()) return true;
+    if (*mode != marrow::editor::TimelineCurveMode::Auto) {
+        *error_out = "driver requires mode 'auto'.";
+        return false;
+    }
+    if (!driver_value->is_string()) {
+        *error_out = "driver must be one of angle, x, y, r, g, b, a.";
+        return false;
+    }
+    const auto driver =
+        marrow::editor::curve_driver_from_token(driver_value->as_string());
+    if (!driver.has_value()) {
+        *error_out = "driver must be one of angle, x, y, r, g, b, a.";
+        return false;
+    }
+    *driver_out = *driver;
+    return true;
+}
+
+bool interpolation_request_arg(
+    const json::Value& args,
+    std::string_view name,
+    marrow::runtime::InterpolationKind* kind_out,
+    std::array<double, 4>* control_points_out,
+    std::string* error_out) {
+    const std::string missing = std::string(name) +
+        " is required and must be linear, stepped, ease, ease_in, ease_out, "
+        "ease_in_out, or a 4-number bezier array.";
+    const json::Value* value = json::find_member(args, name);
+    if (value == nullptr || value->is_null()) {
+        *error_out = missing;
+        return false;
+    }
+    if (value->is_string()) {
+        if (value->as_string() == "linear") {
+            *kind_out = marrow::runtime::InterpolationKind::Linear;
+            *control_points_out = {0.0, 0.0, 1.0, 1.0};
+            return true;
+        }
+        if (value->as_string() == "stepped") {
+            *kind_out = marrow::runtime::InterpolationKind::Stepped;
+            *control_points_out = {0.0, 0.0, 1.0, 1.0};
+            return true;
+        }
+        // MAR-170: the four remaining fixed presets, resolved through the one
+        // table that owns the numbers. snake_case only — no hyphenated aliases.
+        // Linear and Stepped keep their own branches above so their historical
+        // {0, 0, 1, 1} control-point echo is byte-identical to MAR-169's.
+        if (const auto preset =
+                marrow::editor::curve_preset_from_token(value->as_string())) {
+            const auto& definition = marrow::editor::curve_preset_definition(*preset);
+            *kind_out = definition.kind;
+            *control_points_out = definition.control_points;
+            return true;
+        }
+        *error_out = missing;
+        return false;
+    }
+    if (!value->is_array() || value->as_array().size() != 4U) {
+        *error_out = missing;
+        return false;
+    }
+    std::array<double, 4> coordinates{};
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        const json::Value& coordinate = value->as_array()[index];
+        if (!coordinate.is_number()) {
+            *error_out = "bezier interpolation values must be numbers.";
+            return false;
+        }
+        coordinates[index] = coordinate.as_number();
+    }
+    *kind_out = marrow::runtime::InterpolationKind::CubicBezier;
+    *control_points_out = coordinates;
+    return true;
+}
+
 bool parse_number_array(
     const json::Value& args,
     std::string_view name,
@@ -451,6 +658,8 @@ json::Value review_to_json(const AgentReviewRequest& request) {
     review.emplace("binary", bool_value(request.binary_output));
     review.emplace("allowed", bool_value(request.allowed));
     review.emplace("message", string_value(request.message));
+    review.emplace("input_path", string_value(request.input_path.string()));
+    review.emplace("plan_digest", string_value(request.plan_digest));
     return object_value(std::move(review));
 }
 
@@ -463,8 +672,12 @@ AgentDispatchResult enqueue_review(
     std::filesystem::path target_path,
     bool binary_output,
     std::vector<std::filesystem::path> target_paths,
-    std::string args_summary) {
+    std::string args_summary,
+    std::filesystem::path input_path,
+    std::string plan_digest) {
     AgentReviewRequest request;
+    request.input_path = std::move(input_path);
+    request.plan_digest = std::move(plan_digest);
     request.id = context.control.next_review_id++;
     request.kind = kind;
     request.op = std::string(op);
@@ -682,36 +895,6 @@ json::Value constraints_value(const marrow::runtime::SkeletonData& skeleton) {
     return array_value(std::move(constraints));
 }
 
-std::optional<marrow::editor::DrawOrderTimelineEdit> draw_order_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view animation_name) {
-    const marrow::runtime::AnimationData* animation = skeleton.find_animation(animation_name);
-    if (animation == nullptr) {
-        return std::nullopt;
-    }
-
-    marrow::editor::DrawOrderTimelineEdit edit;
-    edit.animation_name = std::string(animation_name);
-    const marrow::runtime::DrawOrderTimeline* timeline = animation->find_draw_order_timeline();
-    if (timeline == nullptr) {
-        return edit;
-    }
-
-    for (const auto& keyframe : timeline->keyframes) {
-        marrow::editor::DrawOrderKeyframeEdit copied;
-        copied.time = static_cast<double>(keyframe.time);
-        copied.slot_names.reserve(keyframe.slot_indices.size());
-        for (const std::size_t slot_index : keyframe.slot_indices) {
-            if (slot_index >= skeleton.slots().size()) {
-                return std::nullopt;
-            }
-            copied.slot_names.push_back(skeleton.slots()[slot_index].name);
-        }
-        edit.keyframes.push_back(std::move(copied));
-    }
-    return edit;
-}
-
 bool parse_complete_slot_order(
     const marrow::runtime::SkeletonData& skeleton,
     const json::Value& args,
@@ -780,70 +963,6 @@ const marrow::runtime::AttachmentData* find_mesh_attachment(
     return attachment;
 }
 
-marrow::editor::MeshWeightAttachmentEdit mesh_weight_edit_from_runtime(
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view skin_name,
-    std::string_view slot_name,
-    std::string_view attachment_name,
-    const marrow::runtime::AttachmentData& attachment) {
-    marrow::editor::MeshWeightAttachmentEdit edit;
-    edit.skin_name = std::string(skin_name);
-    edit.slot_name = std::string(slot_name);
-    edit.attachment_name = std::string(attachment_name);
-    if (attachment.mesh_geometry == nullptr) {
-        return edit;
-    }
-    edit.vertices.reserve(attachment.mesh_geometry->weights.size());
-    for (const auto& runtime_vertex : attachment.mesh_geometry->weights) {
-        marrow::editor::MeshWeightVertexEdit vertex;
-        vertex.influences.reserve(runtime_vertex.influences.size());
-        for (const auto& influence : runtime_vertex.influences) {
-            if (influence.bone_index >= skeleton.bones().size()) {
-                continue;
-            }
-            vertex.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
-                skeleton.bones()[influence.bone_index].name,
-                influence.x,
-                influence.y,
-                influence.weight});
-        }
-        edit.vertices.push_back(std::move(vertex));
-    }
-    return edit;
-}
-
-void normalize_weight_vertex(marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (vertex == nullptr) {
-        return;
-    }
-    double total = 0.0;
-    for (const auto& influence : vertex->influences) {
-        total += std::max(0.0, influence.weight);
-    }
-    if (total <= 0.0) {
-        return;
-    }
-    for (auto& influence : vertex->influences) {
-        influence.weight = std::max(0.0, influence.weight) / total;
-    }
-}
-
-marrow::editor::MeshWeightAttachmentEdit* ensure_mesh_weight_edit(
-    marrow::editor::ProjectData& project,
-    const marrow::runtime::SkeletonData& skeleton,
-    std::string_view skin_name,
-    std::string_view slot_name,
-    std::string_view attachment_name,
-    const marrow::runtime::AttachmentData& attachment) {
-    if (auto* existing = project.find_mesh_weight_attachment_edit(
-            skin_name, slot_name, attachment_name)) {
-        return existing;
-    }
-    project.mesh_weight_attachment_edits.push_back(
-        mesh_weight_edit_from_runtime(skeleton, skin_name, slot_name, attachment_name, attachment));
-    return &project.mesh_weight_attachment_edits.back();
-}
-
 json::Value timeline_description_value(
     const marrow::runtime::SkeletonData& skeleton,
     const marrow::editor::ProjectData& project,
@@ -874,6 +993,12 @@ json::Value timeline_description_value(
     object.emplace("slot_attachment_timelines", number_value(animation->slot_attachment_timelines.size()));
     object.emplace("slot_color_timelines", number_value(animation->slot_color_timelines.size()));
     object.emplace("mesh_deform_timelines", number_value(animation->mesh_deform_timelines.size()));
+    // MAR-185, purely additive: every shipped member keeps its name, type and
+    // position. Read from the MATERIALIZED animation, so it is subject to the
+    // runtime's constant-timeline pruning.
+    object.emplace(
+        "bone_inherit_timelines",
+        number_value(animation->bone_inherit_timelines.size()));
     const auto* runtime_draw_order = animation->find_draw_order_timeline();
     const auto* project_draw_order = project.find_draw_order_timeline_edit(animation_name);
     object.emplace(
@@ -1023,6 +1148,92 @@ bool validate_agent_operation_registry(std::string* error_out) {
         error_out->clear();
     }
     return true;
+}
+
+AgentDispatchResult apply_agent_review(
+    EditorSession& session,
+    AgentControlState& control,
+    std::uint64_t review_id) {
+    const auto request = std::find_if(
+        control.review_queue.begin(),
+        control.review_queue.end(),
+        [review_id](const AgentReviewRequest& entry) { return entry.id == review_id; });
+    if (request == control.review_queue.end()) {
+        return agent_detail::make_error(
+            "No queued agent review with id " + std::to_string(review_id) + ".",
+            "agent.review.apply",
+            nullptr,
+            "unknown_review");
+    }
+    if (request->kind != AgentReviewKind::ImportOrPack ||
+        request->op != "import.psd_layers") {
+        return agent_detail::make_error(
+            "Agent review #" + std::to_string(review_id) +
+                " is not an executable PSD reimport.",
+            "agent.review.apply",
+            nullptr,
+            "unsupported_review");
+    }
+    // The whitelist verdict recorded at ENQUEUE time. Re-deriving it here would
+    // ask a different question -- "is it allowed now" -- and would silently
+    // approve a request that was rejected when it was made.
+    if (!request->allowed) {
+        return agent_detail::make_error(
+            "Agent review #" + std::to_string(review_id) +
+                " was rejected by the path whitelist.",
+            "agent.review.apply",
+            nullptr,
+            "forbidden_path");
+    }
+    if (!session.has_project() || session.project() == nullptr) {
+        return agent_detail::make_error(
+            "No editor project is open.", "agent.review.apply", nullptr, "no_project");
+    }
+
+    const std::filesystem::path staging_root =
+        std::filesystem::temp_directory_path() / "marrow_agent_psd_apply";
+    PsdReimportPlan plan;
+    const std::string planning_error = agent_detail::plan_project_reimport(
+        session, request->input_path, staging_root, &plan);
+    if (!planning_error.empty()) {
+        return agent_detail::make_error(
+            planning_error, "agent.review.apply", nullptr, "psd_plan_failed");
+    }
+    const std::string digest = agent_detail::psd_plan_digest(plan);
+    if (digest != request->plan_digest) {
+        std::error_code cleanup;
+        std::filesystem::remove_all(plan.staging_root, cleanup);
+        return agent_detail::make_error(
+            "The PSD changed since review #" + std::to_string(review_id) +
+                " was queued; re-run the dry run and approve the new plan.",
+            "agent.review.apply",
+            nullptr,
+            "psd_changed_since_review");
+    }
+
+    PsdReimportCommitOptions options;
+    options.project_path = session.project()->source_path;
+    const PsdReimportCommitResult committed = commit_psd_reimport(session, plan, options);
+    std::error_code cleanup;
+    std::filesystem::remove_all(plan.staging_root, cleanup);
+    if (!committed) {
+        // The request stays queued: nothing was decided, the bundle is as it was,
+        // and removing the request would lose the only record of what was asked.
+        return agent_detail::make_error(
+            "The PSD reimport was not committed: " + committed.error,
+            "agent.review.apply",
+            nullptr,
+            "commit_failed");
+    }
+
+    control.review_queue.erase(request);
+    AgentDispatchResult result = agent_detail::make_success(
+        "Committed PSD reimport for review #" + std::to_string(review_id) + ".",
+        "agent.review.apply",
+        nullptr,
+        agent_detail::psd_plan_value(plan, digest));
+    result.mutating = true;
+    return result;
 }
 
 } // namespace marrow::editor

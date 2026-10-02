@@ -28,7 +28,7 @@ bool validate_parameter_mode_shell_smoke(
     ImGuiIO& io) {
     if (state == nullptr || state->session.project() == nullptr ||
         !state->session.project()->parameter_model.has_value() ||
-        state->load_result.skeleton_data == nullptr || state->preview_skeleton == nullptr) {
+        state->load_result.skeleton_data == nullptr || state->preview_skeleton() == nullptr) {
         std::cerr << "Parameter shell smoke requires a parameter project preview.\n";
         return false;
     }
@@ -62,7 +62,7 @@ bool validate_parameter_mode_shell_smoke(
     if (!variant_index.has_value() ||
         variant_direct == state->session.preview_state().direct_parameter_values.end() ||
         std::abs(variant_direct->second - 7.4) > 1e-9 ||
-        std::abs(state->preview_skeleton->parameter_values()[*variant_index] - 7.0) > 1e-9 ||
+        std::abs(state->preview_skeleton()->parameter_values()[*variant_index] - 7.0) > 1e-9 ||
         state->session.dirty() != dirty_before_unclamped_preview ||
         marrow::editor::serialize_project(*state->session.project()) !=
             project_before_unclamped_preview) {
@@ -74,7 +74,7 @@ bool validate_parameter_mode_shell_smoke(
     const AuthoringResult collision = marrow::editor::capture_current_deformer_keyform(
         &collision_candidate,
         *state->load_result.skeleton_data,
-        *state->preview_skeleton,
+        *state->preview_skeleton(),
         "mouth.open.shape",
         false);
     if (collision || collision.error.find("already exists") == std::string::npos) {
@@ -88,7 +88,7 @@ bool validate_parameter_mode_shell_smoke(
                 return marrow::editor::capture_current_deformer_keyform(
                     project,
                     *state->load_result.skeleton_data,
-                    *state->preview_skeleton,
+                    *state->preview_skeleton(),
                     "mouth.open.shape",
                     true);
             })) {
@@ -143,7 +143,7 @@ bool validate_parameter_mode_shell_smoke(
         preserved_variant_direct ==
             state->session.preview_state().direct_parameter_values.end() ||
         preserved_variant_direct->second != 7.4 ||
-        std::abs(state->preview_skeleton->parameter_values()[*variant_index] - 7.0) > 1e-9) {
+        std::abs(state->preview_skeleton()->parameter_values()[*variant_index] - 7.0) > 1e-9) {
         std::cerr << "Parameter/group fields or preview preservation failed after rebuild.\n";
         return false;
     }
@@ -428,7 +428,7 @@ bool validate_parameter_mode_shell_smoke(
         !marrow::editor::capture_current_deformer_keyform(
             capture_gesture.project(),
             *state->load_result.skeleton_data,
-            *state->preview_skeleton,
+            *state->preview_skeleton(),
             rotation_id,
             false) ||
         !set_parameter_geometry_value(

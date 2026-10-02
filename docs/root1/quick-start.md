@@ -32,8 +32,8 @@ Windows 10 are `NOT REQUIRED` and unqualified.
 
 MAR-192 through MAR-210 remain an open, parallel deferred qualification
 backlog. They do not grant support credit and do not block the completed
-Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167 checkpoints or the next
-MAR-168 product milestone.
+Task #28/MAR-163/MAR-164/MAR-165/MAR-166/MAR-167/MAR-168/MAR-169/MAR-170/
+MAR-172/MAR-173/MAR-174 checkpoints or the next MAR-175 product milestone.
 
 Display/device tests are deliberately absent from the default CTest registry.
 Enable them explicitly on a real supported host:
@@ -61,12 +61,87 @@ display plots effective runtime values and the actual outgoing Linear, Stepped,
 or Cubic easing. One outgoing easing belongs to the complete Transform or RGBA
 parent key, not to an individual component.
 
-MAR-167 is read-only. Point dragging displays the MAR-168 editing boundary and
-does not change key time or value. FFD and discrete Inherit, Attachment, Draw
-Order, and Event lanes show an unsupported empty state instead of stale graph
-data. Graph tab, visibility, Fit, pan, zoom, hover, and active-component state
-are shell-private and are not saved to `.marrow`, runtime export, history,
-dirty state, runtime revision, or Agent/MCP.
+Graph points are draggable. Press a point to select it, then move the pointer:
+the first 4 logical pixels of motion lock one axis for the whole drag. A
+dominant vertical move edits only the pressed scalar component on every
+selected key of the focused track; a dominant horizontal move retimes the whole
+parent key, and every selected key, carrying all of its components with it. A
+press and release without motion is still a plain selection click.
+
+The **Snap** checkbox on the Graph toolbar is the same shared frame-snap
+setting the Dopesheet tab owns, so toggling it in either tab is visible in the
+other. Hold Alt to bypass frame snapping for the current drag. Escape, leaving
+the Graph tab, or losing window focus cancels the drag and restores the project
+exactly. One drag is always one undo entry, and a drag that ends where it
+started creates none. Slot Color R/G/B/A clamps group-wide to `[0, 1]`; Angle,
+Translate, Scale, and Shear are unclamped, so a signed or exactly zero scale
+stays authorable. Dragging a key past an authored explicit duration grows that
+duration inside the same undo entry.
+
+The active key's outgoing segment also draws two light-blue square Bezier
+handles, for the active component only, joined to their anchors by thin tangent
+lines. One curve therefore has exactly one pair of handles even when several
+components are visible, because the easing belongs to the whole parent key.
+Pressing a handle wins over pressing a key point and does not scrub the playhead
+or change the selection. Dragging is free 2-D, with no axis lock: the horizontal
+control point stops at exactly `0` and `1` and the drag keeps going, while
+vertical overshoot past the anchors is allowed and is what produces anticipation
+and follow-through. Grabbing a handle on a Linear or Stepped segment converts
+that segment to Bezier, seeded at the curve that is exactly equal to Linear, in
+the same undo entry as the drag. A segment whose two anchors sit less than one
+pixel apart vertically still edits: 100 logical pixels of vertical travel is
+defined to equal `1.0` there, and the readout says so. A zero-duration segment
+gets no handles at all. The component checkboxes and **Fit** are disabled while
+any graph drag is live, so the dragged component cannot be hidden underneath the
+gesture. Escape, leaving the Graph tab, and losing focus cancel an easing drag
+exactly as they cancel a point drag, and one handle drag is one undo entry.
+
+Both timeline tabs also carry a **Curve:** row of six fixed presets — Linear,
+Stepped, Ease, In, Out, In-Out — and a **Default:** combo. A preset button
+applies its fixed curve to every compatible selected key at once, as a single
+previewed undo entry; Draw Order, Event, and Slot Attachment keys carry no
+easing, so they are skipped and the status line reports how many. The row is
+disabled, not hidden, when the selection contains no compatible key or while a
+drag is live. Each button's tooltip gives the full name and the exact
+`[cx1, cy1, cx2, cy2]`, and the Graph toolbar's **Outgoing:** readout names the
+preset the active key's curve exactly is, or `Custom Bezier` after you drag a
+handle away from one. No preset overshoots; only a manual handle drag can. The
+**Default:** combo chooses the curve that newly added Transform, Deform, and
+Slot Color keys start with — whether you add the key at the playhead, drag a
+mesh vertex, drag a viewport gizmo, or type a value into the Inspector at a time
+that has no key yet. Editing a key that already exists never changes its curve. It is stored per user in `editor-settings.json`,
+never in the project, so it never dirties a file and never changes an existing
+key; applying a preset does not change it. Missing, malformed, or
+future-versioned settings fall back to Linear without rewriting the file, and
+pasted keys always keep the curve they were copied with.
+
+The Graph toolbar carries one more row, **Curve mode:**, with `Manual` and
+`Auto` buttons and a `Driver:` combo. `Manual` is what every key has always
+been: the stored easing is exactly what you put there. `Auto` records that the
+easing should be whatever a smooth curve through the driver's neighbouring keys
+says it should be, and the editor keeps that promise — move a neighbour in time
+or value, add one, delete one, paste one, or drag a bone, and the affected
+curves are recomputed inside that same edit, so it is still one undo step. An
+automatic key's handles are drawn hollow and amber instead of filled and blue,
+and grabbing one switches that segment back to manual in the same drag, because
+you have just said the curve should stop following its neighbours. Automatic
+curves never overshoot; only a manual handle drag can. The `Driver:` combo picks
+which series drives the shape — `Angle` for a rotate key, `X`/`Y` for
+translate, scale, and shear, and `Red`/`Green`/`Blue`/`Alpha` for a slot colour
+— and is disabled when the selection spans families that share no component.
+Mesh deform keys have no automatic mode: a vertex-offset vector has no single
+number to compute a tangent from. MAR-172 adds loop-boundary key
+synchronization as a per-lane `.marrow` flag with no widget of its own: an
+opted-in Transform, Slot Color, or Deform lane always carries one managed key at
+the clip's explicit duration mirroring its key at time zero, the editor
+re-establishes that inside the same transaction as any edit, and the graph and
+dopesheet skip that derived key for direct value and easing authoring.
+FFD and discrete Inherit,
+Attachment, Draw Order, and Event lanes show an unsupported empty state instead
+of stale graph data. Graph tab, visibility, Fit, pan, zoom, hover,
+active-component, and drag state are shell-private and are not saved to
+`.marrow`, runtime export, history, dirty state, runtime revision, or
+Agent/MCP.
 
 ## Auto-key an attachment-local FFD vertex group
 

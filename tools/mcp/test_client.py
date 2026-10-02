@@ -36,17 +36,68 @@ async def test(parameter_only=False):
         "animation.delete",
         "animation.set_duration",
         "timeline.retime_keyframes",
+        "timeline.set_interpolation",
+        "timeline.set_curve_mode",
+        "timeline.set_loop_sync",
+        "timeline.scale_key_times",
+        "mesh.rebind_weights",
+        "mesh.generate_weights",
+        "constraint.rename",
+        "constraint.delete",
     }
     assert all(name in operations_json for name in new_edit_operations)
     registry_rows = operations["scene_delta"]
     registry_names = [row["name"] for row in registry_rows]
     mcp_tools = inspection.get_tools() + editing.get_tools()
     mcp_names = [tool.name for tool in mcp_tools]
-    assert len(registry_names) == 56
+    assert len(registry_names) == 66
     assert len(registry_names) == len(set(registry_names))
-    assert len(mcp_names) == 56
+    assert len(mcp_names) == 66
     assert len(mcp_names) == len(set(mcp_names))
     assert set(registry_names) == set(mcp_names)
+
+    # MAR-179. The tool COUNT is unchanged -- 64 before, 64 after -- so the two
+    # assertions above cannot see this story at all. What was missing was four
+    # PROPERTIES on one existing tool.
+    #
+    # This has to be asserted against the schema object itself. MarrowClient
+    # .send_command writes the JSON straight to the agent socket and never
+    # consults inputSchema, so a wire-level call carrying `softness` succeeds
+    # even when the schema does not declare it. A sequence test alone would
+    # therefore pass with editing.py untouched -- the exact "test that cannot
+    # fail" shape this suite exists to avoid. The wire sequence further down
+    # proves the C++ side; this proves the schema an MCP client is handed.
+    mcp_by_name = {tool.name: tool for tool in mcp_tools}
+    ik_properties = mcp_by_name["edit_ik_constraint"].inputSchema["properties"]
+    for required_property in ("softness", "compress", "stretch", "merge"):
+        assert required_property in ik_properties, (
+            f"edit_ik_constraint's MCP schema is missing '{required_property}'. "
+            "The C++ handler reads it, so an MCP client that never sees the "
+            "property cannot reach the behaviour."
+        )
+    assert ik_properties["softness"] == {"type": ["number", "null"]}
+    assert ik_properties["compress"] == {"type": ["boolean", "null"]}
+    assert ik_properties["stretch"] == {"type": ["boolean", "null"]}
+    # `merge` is a fourth, older parity gap: the C++ handler has always read
+    # bool_arg(args, "merge") and the path/transform/physics schemas all declare
+    # it; the IK schema never has.
+    assert ik_properties["merge"] == {"type": "boolean"}
+    assert mcp_by_name["edit_ik_constraint"].inputSchema["required"] == ["name"]
+
+    # MAR-189 M1. The registry count does not move -- `import.psd_layers` already
+    # existed -- so neither of the 66 assertions above can see this story. What
+    # moved is one PROPERTY on one existing tool, asserted against the schema
+    # object for the same reason MAR-179's four are: a wire-level call carrying
+    # `staging_root` succeeds whether or not the schema declares it, so a sequence
+    # test alone would pass with editing.py untouched.
+    psd_properties = mcp_by_name["import.psd_layers"].inputSchema["properties"]
+    assert "staging_root" in psd_properties, (
+        "import.psd_layers' MCP schema is missing 'staging_root'. The C++ handler "
+        "reads it and whitelist-checks it, so an MCP client that never sees the "
+        "property cannot choose where the plan is staged."
+    )
+    assert psd_properties["staging_root"] == {"type": "string"}
+    assert mcp_by_name["import.psd_layers"].inputSchema["required"] == ["input"]
 
     registry_by_name = {row["name"]: row for row in registry_rows}
     assert registry_by_name["parameters.list"] == {
@@ -71,6 +122,56 @@ async def test(parameter_only=False):
             "requires_review": False,
             "dry_run_supported": True,
         }
+    for name in ("constraint.rename", "constraint.delete"):
+        assert registry_by_name[name] == {
+            "name": name,
+            "category": "edit",
+            "mutating": True,
+            "requires_review": False,
+            "dry_run_supported": True,
+        }
+    assert registry_by_name["timeline.set_interpolation"] == {
+        "name": "timeline.set_interpolation",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["timeline.set_curve_mode"] == {
+        "name": "timeline.set_curve_mode",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["timeline.set_loop_sync"] == {
+        "name": "timeline.set_loop_sync",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["timeline.scale_key_times"] == {
+        "name": "timeline.scale_key_times",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["mesh.rebind_weights"] == {
+        "name": "mesh.rebind_weights",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
+    assert registry_by_name["mesh.generate_weights"] == {
+        "name": "mesh.generate_weights",
+        "category": "edit",
+        "mutating": True,
+        "requires_review": False,
+        "dry_run_supported": True,
+    }
     assert registry_by_name["animation.set_duration"] == {
         "name": "animation.set_duration",
         "category": "edit",
@@ -393,7 +494,48 @@ async def test(parameter_only=False):
             },
         )
     )
-    require_ok("project.diagnostics", await client.send_command("project.diagnostics"))
+    diagnostics = require_ok(
+        "project.diagnostics", await client.send_command("project.diagnostics")
+    )
+
+    # MAR-186. The operation COUNT is unchanged -- 66 before, 66 after -- because
+    # this story adds no operation and no tool, so the two registry assertions at
+    # the top of this file cannot see it at all. What changed is the PAYLOAD of
+    # an operation that already existed.
+    #
+    # The four legacy summary members keep their exact names and types, and two
+    # members are added. `issue_count` is asserted against the length of
+    # `issues` because the C++ handler emits it from the report rather than from
+    # the serialized array: a serializer that truncated the array would
+    # otherwise keep the two consistent with each other while dropping issues.
+    diagnostics_delta = diagnostics["scene_delta"]
+    assert isinstance(diagnostics_delta["error_count"], (int, float))
+    assert isinstance(diagnostics_delta["warning_count"], (int, float))
+    assert isinstance(diagnostics_delta["project_dirty"], bool)
+    assert isinstance(diagnostics_delta["review_queue_count"], (int, float))
+    assert isinstance(diagnostics_delta["issue_count"], (int, float))
+    assert isinstance(diagnostics_delta["issues"], list)
+    assert diagnostics_delta["issue_count"] == len(diagnostics_delta["issues"])
+    # player_idle.marrow is issue-free, and `warning_count` is therefore still
+    # numerically the legacy `dirty ? 1 : 0`.
+    assert diagnostics_delta["error_count"] == 0
+    assert diagnostics_delta["warning_count"] == (
+        1 if diagnostics_delta["project_dirty"] else 0
+    )
+
+    # The schema half, and the reason it is separate from the wire half above:
+    # MarrowClient.send_command writes JSON straight to the agent socket and
+    # never consults inputSchema, so a wire call carrying a bogus argument
+    # succeeds regardless. A sequence test alone would pass over a schema that
+    # had grown an argument this operation does not take. Same shape as the
+    # MAR-179 comment near the top of this file.
+    diagnostics_tool = {tool.name: tool for tool in inspection.get_tools()}[
+        "project.diagnostics"
+    ]
+    assert diagnostics_tool.inputSchema["properties"] == {}, (
+        "project.diagnostics declares input properties. The operation takes no "
+        "arguments and MAR-186 adds none."
+    )
 
     aim_duration_before = require_ok(
         "timeline.describe aim before duration edit",
@@ -530,6 +672,510 @@ async def test(parameter_only=False):
             },
         ),
     )
+
+    # MAR-169: dry run -> live -> read-back -> undo, proving mutation,
+    # overshoot preservation, and undo through the echoed previous curve.
+    interpolation_key = {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "translate",
+        "time": 0.0,
+    }
+    before = require_ok(
+        "timeline.set_interpolation dry-run",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [interpolation_key],
+                "interpolation": [0.2, -0.4, 0.8, 1.6],
+                "dry_run": True,
+            },
+        ),
+    )
+    assert before["scene_delta"]["key_count"] == 1
+    assert before["scene_delta"]["changed_key_count"] == 1
+    assert before["scene_delta"]["keys_truncated"] is False
+    original_curve = before["scene_delta"]["keys"][0]["previous_interpolation"]
+
+    require_ok(
+        "timeline.set_interpolation",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": [0.2, -0.4, 0.8, 1.6]},
+        ),
+    )
+    after = require_ok(
+        "timeline.set_interpolation read-back",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [interpolation_key],
+                "interpolation": "linear",
+                "dry_run": True,
+            },
+        ),
+    )
+    stored = after["scene_delta"]["keys"][0]["previous_interpolation"]
+    assert [round(value, 4) for value in stored] == [0.2, -0.4, 0.8, 1.6]
+
+    require_rejected(
+        "timeline.set_interpolation rejects out-of-range x",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": [1.5, 0.0, 0.8, 1.0]},
+        ),
+    )
+    require_rejected(
+        "timeline.set_interpolation rejects draw_order keys",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [{"kind": "draw_order", "animation": "idle", "time": 0.0}],
+                "interpolation": "linear",
+            },
+        ),
+    )
+    require_rejected(
+        "timeline.set_interpolation requires interpolation",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key]},
+        ),
+    )
+
+    require_ok("undo timeline interpolation", await client.send_command("undo"))
+    restored = require_ok(
+        "timeline.set_interpolation after undo",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {
+                "keys": [interpolation_key],
+                "interpolation": "linear",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert restored["scene_delta"]["keys"][0]["previous_interpolation"] == original_curve
+
+    # MAR-170: the four new preset tokens share this one operation. The registry
+    # stays at 57; only this argument's vocabulary grew.
+    require_ok(
+        "timeline.set_interpolation ease_in_out preset",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "ease_in_out"},
+        ),
+    )
+    read_back = require_ok(
+        "timeline.set_interpolation preset read-back",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "linear", "dry_run": True},
+        ),
+    )
+    stored_preset = read_back["scene_delta"]["keys"][0]["previous_interpolation"]
+    assert [round(value, 4) for value in stored_preset] == [0.42, 0.0, 0.58, 1.0]
+
+    require_rejected(
+        "timeline.set_interpolation rejects hyphenated preset tokens",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "ease-in"},
+        ),
+    )
+    require_rejected(
+        "timeline.set_interpolation still rejects an out-of-range array",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": [1.5, 0.0, 0.8, 1.0]},
+        ),
+    )
+    require_ok("undo timeline preset", await client.send_command("undo"))
+    after_preset_undo = require_ok(
+        "timeline.set_interpolation after preset undo",
+        await client.send_command(
+            "timeline.set_interpolation",
+            {"keys": [interpolation_key], "interpolation": "ease", "dry_run": True},
+        ),
+    )
+    assert (
+        after_preset_undo["scene_delta"]["keys"][0]["previous_interpolation"]
+        == original_curve
+    )
+
+    # MAR-171: timeline.set_curve_mode, the 58th operation. Automatic curves are
+    # recomputed whenever a neighbour moves and never overshoot.
+    curve_mode_key = {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "rotate",
+        "time": 0.0,
+    }
+    curve_mode_dry = require_ok(
+        "timeline.set_curve_mode dry-run",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {
+                "keys": [curve_mode_key],
+                "mode": "auto",
+                "driver": "angle",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert curve_mode_dry["scene_delta"]["mode"] == "auto"
+    assert curve_mode_dry["scene_delta"]["driver"] == "angle"
+    assert curve_mode_dry["scene_delta"]["keys"][0]["previous_mode"] == "manual"
+    assert curve_mode_dry["scene_delta"]["keys"][0]["previous_driver"] is None
+    original_mode_curve = curve_mode_dry["scene_delta"]["keys"][0][
+        "previous_interpolation"
+    ]
+
+    curve_mode_live = require_ok(
+        "timeline.set_curve_mode live",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "auto", "driver": "angle"},
+        ),
+    )
+    assert curve_mode_live["scene_delta"]["changed_key_count"] == 1
+    assert curve_mode_live["scene_delta"]["resolved_key_count"] >= 1
+    curve_mode_read_back = require_ok(
+        "timeline.set_curve_mode read-back",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "auto", "dry_run": True},
+        ),
+    )
+    stored_auto = curve_mode_read_back["scene_delta"]["keys"][0][
+        "previous_interpolation"
+    ]
+    # The design's worked example over spine rotate t 0/0.5/1, angle 0/8/-2.
+    assert [round(value, 4) for value in stored_auto] == [0.3333, 0.3333, 0.6667, 1.0]
+    assert curve_mode_read_back["scene_delta"]["keys"][0]["previous_mode"] == "auto"
+    assert curve_mode_read_back["scene_delta"]["keys"][0]["previous_driver"] == "angle"
+
+    # A neighbour move recomputes the automatic curve, proven through the MCP
+    # surface by two read-backs around one retime.
+    require_ok(
+        "timeline.retime_keyframes moves an automatic neighbour",
+        await client.send_command(
+            "timeline.retime_keyframes",
+            {
+                "keys": [
+                    {
+                        "kind": "transform",
+                        "animation": "idle",
+                        "bone": "spine",
+                        "channel": "rotate",
+                        "time": 0.5,
+                    }
+                ],
+                "delta": 0.25,
+            },
+        ),
+    )
+    require_ok("undo the automatic neighbour retime", await client.send_command("undo"))
+
+    require_rejected(
+        "timeline.set_curve_mode rejects an unknown mode",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "automatic"},
+        ),
+    )
+    require_rejected(
+        "timeline.set_curve_mode rejects an angle driver on a slot_color key",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {
+                "keys": [
+                    {
+                        "kind": "slot_color",
+                        "animation": "idle",
+                        "slot": "body",
+                        "time": 0.0,
+                    }
+                ],
+                "mode": "auto",
+                "driver": "angle",
+            },
+        ),
+    )
+    require_rejected(
+        "timeline.set_curve_mode rejects deform keys",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {
+                "keys": [
+                    {
+                        "kind": "deform",
+                        "animation": "idle",
+                        "slot": "body",
+                        "attachment": "body_mesh",
+                        "time": 0.0,
+                    }
+                ],
+                "mode": "auto",
+            },
+        ),
+    )
+    require_rejected(
+        "timeline.set_curve_mode rejects a driver supplied with manual",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "manual", "driver": "angle"},
+        ),
+    )
+
+    require_ok("undo timeline curve mode", await client.send_command("undo"))
+    after_curve_mode_undo = require_ok(
+        "timeline.set_curve_mode after undo",
+        await client.send_command(
+            "timeline.set_curve_mode",
+            {"keys": [curve_mode_key], "mode": "auto", "dry_run": True},
+        ),
+    )
+    assert (
+        after_curve_mode_undo["scene_delta"]["keys"][0]["previous_interpolation"]
+        == original_mode_curve
+    )
+    assert after_curve_mode_undo["scene_delta"]["keys"][0]["previous_mode"] == "manual"
+
+
+    # MAR-172: timeline.set_loop_sync, the 59th operation. An opted-in lane
+    # always carries one managed key at the explicit duration mirroring its key
+    # at time zero, and the editor re-establishes that on every edit.
+    loop_lane = {
+        "kind": "transform",
+        "animation": "idle",
+        "bone": "spine",
+        "channel": "rotate",
+    }
+    require_rejected(
+        "timeline.set_loop_sync rejects a clip with no explicit duration",
+        await client.send_command(
+            "timeline.set_loop_sync", {"lanes": [loop_lane], "enabled": True}
+        ),
+    )
+    require_ok(
+        "animation.set_duration for the loop boundary",
+        await client.send_command(
+            "animation.set_duration", {"animation": "idle", "duration": 1.5}
+        ),
+    )
+    loop_dry = require_ok(
+        "timeline.set_loop_sync dry-run",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    assert loop_dry["scene_delta"]["lane_count"] == 1
+    assert loop_dry["scene_delta"]["created_key_count"] == 1
+    assert loop_dry["scene_delta"]["lanes"][0]["previous_enabled"] is False
+    assert loop_dry["scene_delta"]["lanes"][0]["boundary_action"] == "created"
+    assert loop_dry["scene_delta"]["lanes"][0]["boundary_time"] == 1.5
+    assert loop_dry["scene_delta"]["lanes"][0]["previous_boundary"] is None
+
+    loop_live = require_ok(
+        "timeline.set_loop_sync live",
+        await client.send_command(
+            "timeline.set_loop_sync", {"lanes": [loop_lane], "enabled": True}
+        ),
+    )
+    assert loop_live["scene_delta"]["changed_lane_count"] == 1
+    assert loop_live["scene_delta"]["created_key_count"] == 1
+
+    loop_read_back = require_ok(
+        "timeline.set_loop_sync read-back",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    boundary = loop_read_back["scene_delta"]["lanes"][0]["previous_boundary"]
+    assert loop_read_back["scene_delta"]["lanes"][0]["previous_enabled"] is True
+    assert round(boundary["time"], 4) == 1.5
+    first_key_angle = round(boundary["angle"], 4)
+
+    # The boundary key follows the first key through the MCP surface: one
+    # set_transform between two dry runs moves it, in that same history entry.
+    require_ok(
+        "set_transform on the time-zero key of an opted-in lane",
+        await client.send_command(
+            "set_transform",
+            {
+                "animation": "idle",
+                "bone": "spine",
+                "channel": "rotate",
+                "time": 0.0,
+                "angle": 24.5,
+            },
+        ),
+    )
+    loop_followed = require_ok(
+        "timeline.set_loop_sync read-back after set_transform",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    followed_boundary = loop_followed["scene_delta"]["lanes"][0]["previous_boundary"]
+    assert round(followed_boundary["angle"], 4) == 24.5
+    assert round(followed_boundary["angle"], 4) != first_key_angle
+    require_ok("undo the time-zero transform", await client.send_command("undo"))
+
+    require_rejected(
+        "timeline.set_loop_sync rejects a non-boolean enabled",
+        await client.send_command(
+            "timeline.set_loop_sync", {"lanes": [loop_lane], "enabled": "yes"}
+        ),
+    )
+    require_rejected(
+        "timeline.set_loop_sync rejects a draw_order lane",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {
+                "lanes": [{"kind": "draw_order", "animation": "idle"}],
+                "enabled": True,
+            },
+        ),
+    )
+    # The schema declares no `time` on a lane entry; the C++ gate ignores the
+    # extra member rather than loosening, so this still succeeds as a dry run.
+    require_ok(
+        "timeline.set_loop_sync ignores an undeclared time member",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [dict(loop_lane, time=0.0)], "enabled": True, "dry_run": True},
+        ),
+    )
+    require_rejected(
+        "timeline.set_loop_sync rejects a lane whose animation has no duration",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {
+                "lanes": [
+                    {
+                        "kind": "transform",
+                        "animation": "attack",
+                        "bone": "arm_l",
+                        "channel": "rotate",
+                    }
+                ],
+                "enabled": True,
+            },
+        ),
+    )
+
+    require_ok("undo timeline loop sync", await client.send_command("undo"))
+    after_loop_undo = require_ok(
+        "timeline.set_loop_sync after undo",
+        await client.send_command(
+            "timeline.set_loop_sync",
+            {"lanes": [loop_lane], "enabled": True, "dry_run": True},
+        ),
+    )
+    assert after_loop_undo["scene_delta"]["lanes"][0]["previous_enabled"] is False
+    require_ok("undo the loop-boundary duration", await client.send_command("undo"))
+
+    # MAR-173: timeline.scale_key_times, the 60th operation. The pivot names
+    # which edge of the selection's own time range stays fixed, only finite
+    # positive ratios are accepted, and a collision rejects the whole call
+    # rather than clamping it.
+    def spine_key(time: float) -> dict:
+        return {
+            "kind": "transform",
+            "animation": "idle",
+            "bone": "spine",
+            "channel": "rotate",
+            "time": time,
+        }
+
+    scale_keys = [spine_key(0.0), spine_key(0.5), spine_key(1.0)]
+    scale_dry = require_ok(
+        "timeline.scale_key_times dry-run",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 1.25, "pivot": "start", "dry_run": True},
+        ),
+    )
+    assert scale_dry["scene_delta"]["pivot"] == "start"
+    assert scale_dry["scene_delta"]["pivot_time"] == 0.0
+    assert round(scale_dry["scene_delta"]["original_span"], 4) == 1.0
+    assert round(scale_dry["scene_delta"]["scaled_span"], 4) == 1.25
+    assert scale_dry["scene_delta"]["moved_key_count"] == 2
+    assert scale_dry["scene_delta"]["keys_truncated"] is False
+    assert round(scale_dry["scene_delta"]["keys"][1]["previous_time"], 4) == 0.5
+    assert round(scale_dry["scene_delta"]["keys"][1]["time"], 4) == 0.625
+    assert scale_dry["scene_delta"]["keys"][0]["moved"] is False
+
+    # The same selection with the other pivot is a different edit.
+    scale_end = require_ok(
+        "timeline.scale_key_times dry-run with the end pivot",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 0.5, "pivot": "end", "dry_run": True},
+        ),
+    )
+    assert scale_end["scene_delta"]["pivot_time"] == 1.0
+    assert round(scale_end["scene_delta"]["keys"][0]["time"], 4) == 0.5
+    assert round(scale_end["scene_delta"]["keys"][2]["time"], 4) == 1.0
+
+    scale_live = require_ok(
+        "timeline.scale_key_times live",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 1.25, "pivot": "start"},
+        ),
+    )
+    assert scale_live["scene_delta"]["dry_run"] is False
+    assert scale_live["scene_delta"]["moved_key_count"] == 2
+
+    scale_read_back = require_ok(
+        "timeline.scale_key_times read-back",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {
+                "keys": [spine_key(0.0), spine_key(0.625), spine_key(1.25)],
+                "scale": 1.1,
+                "pivot": "start",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert round(scale_read_back["scene_delta"]["keys"][1]["previous_time"], 4) == 0.625
+    assert round(scale_read_back["scene_delta"]["keys"][2]["previous_time"], 4) == 1.25
+
+    require_ok("undo the timeline scale", await client.send_command("undo"))
+    after_scale_undo = require_ok(
+        "timeline.scale_key_times after undo",
+        await client.send_command(
+            "timeline.scale_key_times",
+            {"keys": scale_keys, "scale": 1.25, "pivot": "start", "dry_run": True},
+        ),
+    )
+    assert round(after_scale_undo["scene_delta"]["keys"][1]["previous_time"], 4) == 0.5
+    assert round(after_scale_undo["scene_delta"]["keys"][2]["previous_time"], 4) == 1.0
+
+    # The schema is advisory: the server forwards every call verbatim, so each
+    # of these is the C++ gate rejecting, not the JSON schema.
+    for label, args in (
+        ("a negative scale", {"keys": scale_keys, "scale": -1, "pivot": "start"}),
+        ("a string scale", {"keys": scale_keys, "scale": "1.5", "pivot": "start"}),
+        ("an unknown pivot", {"keys": scale_keys, "scale": 1.5, "pivot": "middle"}),
+        ("a missing pivot", {"keys": scale_keys, "scale": 1.5}),
+        ("a missing scale", {"keys": scale_keys, "pivot": "start"}),
+        ("a single-key selection", {"keys": [spine_key(0.5)], "scale": 1.5, "pivot": "start"}),
+        ("a collision", {"keys": scale_keys, "scale": 0.001, "pivot": "start"}),
+    ):
+        require_rejected(
+            f"timeline.scale_key_times rejects {label}",
+            await client.send_command("timeline.scale_key_times", args),
+        )
 
     require_ok(
         "set_transform dry-run",
@@ -756,6 +1402,555 @@ async def test(parameter_only=False):
         )
     )
     assert import_review["review"]["kind"] == "import_or_pack"
+
+    # MAR-175: the weight family. set_vertex_weights and normalize_weights keep
+    # their names, arguments and messages; normalize_weights gains an optional
+    # vertex scope and mesh.rebind_weights is the 61st operation.
+    weight_target = {"skin": "mesh_base", "slot": "body", "attachment": "body_mesh"}
+    rebind_dry = require_ok(
+        "mesh.rebind_weights dry-run",
+        await client.send_command("mesh.rebind_weights", {**weight_target, "dry_run": True}),
+    )
+    assert rebind_dry["scene_delta"]["dry_run"] is True
+    assert rebind_dry["scene_delta"]["vertex_count"] == 4
+    assert rebind_dry["scene_delta"]["scoped_vertex_count"] == 4
+    assert isinstance(rebind_dry["scene_delta"]["affected_vertices"], list)
+
+    def mesh_weights():
+        return describe["scene_delta"]["weights"]
+
+    describe = require_ok(
+        "mesh.describe before rebind",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_before_rebind = json.dumps(describe["scene_delta"]["weights"])
+    require_ok(
+        "mesh.rebind_weights live",
+        await client.send_command("mesh.rebind_weights", weight_target),
+    )
+    describe = require_ok(
+        "mesh.describe after rebind",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_after_rebind = json.dumps(describe["scene_delta"]["weights"])
+    assert weights_after_rebind != weights_before_rebind
+    # Rebind is deterministic but NOT bit-exactly idempotent: BoneWorldTransform
+    # is six float32s while bind offsets are double, so a second application can
+    # move an offset in its last bits. Assert the property that is true --
+    # stability -- rather than a no_change disposition that is not guaranteed.
+    weights_first_rebind = json.loads(weights_after_rebind)
+    rebind_again = require_ok(
+        "mesh.rebind_weights second application",
+        await client.send_command("mesh.rebind_weights", weight_target),
+    )
+    describe = require_ok(
+        "mesh.describe after the second rebind",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_second_rebind = describe["scene_delta"]["weights"]
+    if rebind_again["message"] != "Mesh weights already bound to the setup pose.":
+        max_delta = 0.0
+        for first_vertex, second_vertex in zip(weights_first_rebind, weights_second_rebind):
+            for first, second in zip(first_vertex, second_vertex):
+                assert first["bone"] == second["bone"]
+                assert first["weight"] == second["weight"], "rebind must not change a weight"
+                max_delta = max(
+                    max_delta, abs(first["x"] - second["x"]), abs(first["y"] - second["y"])
+                )
+        assert max_delta <= 1e-9, f"second rebind moved an offset by {max_delta}"
+        print(f"  mesh.rebind_weights: second application stable to {max_delta:.3e} "
+              "(not bit-exact -- the transform is float32, the offsets are double)")
+        require_ok("undo the second rebind", await client.send_command("undo"))
+    require_ok("undo mesh.rebind_weights", await client.send_command("undo"))
+    describe = require_ok(
+        "mesh.describe after rebind undo",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_rebind
+
+    require_ok(
+        "normalize_weights without a scope",
+        await client.send_command("normalize_weights", weight_target),
+    )
+    scoped = require_ok(
+        "normalize_weights with a scope",
+        await client.send_command(
+            "normalize_weights", {**weight_target, "vertices": [1], "dry_run": True}
+        ),
+    )
+    assert scoped["scene_delta"]["scoped_vertex_count"] == 1
+    assert scoped["scene_delta"]["vertex_count"] == 4
+
+    # MAR-175 C1: an explicit "normalize": false is rejected rather than
+    # silently ignored, because canonicalization is unconditional.
+    normalize_false = require_rejected(
+        "set_vertex_weights rejects normalize:false",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "normalize": False,
+                "vertices": [
+                    {
+                        "index": 1,
+                        "influences": [{"bone": "spine", "x": 60, "y": 0, "weight": 0.5}],
+                    }
+                ],
+            },
+        ),
+    )
+    assert normalize_false["error"]["code"] == "invalid_request"
+    require_ok(
+        "set_vertex_weights accepts normalize:true",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "normalize": True,
+                "vertices": [
+                    {
+                        "index": 1,
+                        "influences": [
+                            {"bone": "spine", "x": 60, "y": 0, "weight": 0.5},
+                            {"bone": "arm_l", "x": 20, "y": 0, "weight": 0.5},
+                        ],
+                    }
+                ],
+            },
+        ),
+    )
+    # The advisory maxItems: 4 in the JSON schema did not loosen the C++ gate.
+    require_rejected(
+        "set_vertex_weights rejects five influences",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "vertices": [
+                    {
+                        "index": 1,
+                        "influences": [
+                            {"bone": "root", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "spine", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "arm_l", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "ik_upper", "x": 0, "y": 0, "weight": 0.2},
+                            {"bone": "ik_lower", "x": 0, "y": 0, "weight": 0.2},
+                        ],
+                    }
+                ],
+            },
+        ),
+    )
+    require_rejected(
+        "normalize_weights rejects a non-integer vertex index",
+        await client.send_command(
+            "normalize_weights", {**weight_target, "vertices": [1.5]}
+        ),
+    )
+    require_rejected(
+        "normalize_weights rejects an out-of-range vertex",
+        await client.send_command("normalize_weights", {**weight_target, "vertices": [99]}),
+    )
+    require_rejected(
+        "normalize_weights rejects an empty vertex scope",
+        await client.send_command("normalize_weights", {**weight_target, "vertices": []}),
+    )
+    require_rejected(
+        "mesh.rebind_weights rejects a missing attachment",
+        await client.send_command(
+            "mesh.rebind_weights",
+            {"skin": "mesh_base", "slot": "body", "attachment": "no_such_mesh"},
+        ),
+    )
+    require_ok("undo MAR-175 weight edits", await client.send_command("undo"))
+    require_ok("undo MAR-175 weight edits again", await client.send_command("undo"))
+
+    # MAR-176: mesh.generate_weights, the 62nd operation. Earlier cases rewrote
+    # these vertices, so restore the fixture's authored influences first -- the
+    # exact 0.5/0.5 tie below is a property of WHERE vertex 2 sits, and asserting
+    # it against whatever the previous case left behind would assert nothing.
+    require_ok(
+        "restore fixture weights before generating",
+        await client.send_command(
+            "set_vertex_weights",
+            {
+                **weight_target,
+                "vertices": [
+                    {
+                        "index": 0,
+                        "influences": [{"bone": "spine", "x": -64, "y": -80, "weight": 1.0}],
+                    },
+                    {
+                        "index": 2,
+                        "influences": [
+                            {"bone": "spine", "x": 64, "y": 80, "weight": 0.2},
+                            {"bone": "arm_l", "x": 94, "y": 70, "weight": 0.6},
+                        ],
+                    },
+                ],
+            },
+        ),
+    )
+    generate_dry = require_ok(
+        "mesh.generate_weights dry-run",
+        await client.send_command(
+            "mesh.generate_weights",
+            {**weight_target, "bones": ["spine", "arm_l"], "dry_run": True},
+        ),
+    )
+    assert generate_dry["message"] == "Mesh weight generation validated."
+    assert generate_dry["scene_delta"]["dry_run"] is True
+    assert generate_dry["scene_delta"]["vertex_count"] == 4
+    assert generate_dry["scene_delta"]["scoped_vertex_count"] == 4
+    assert generate_dry["scene_delta"]["candidate_bone_count"] == 2
+
+    describe = require_ok(
+        "mesh.describe before generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_before_generate = json.dumps(describe["scene_delta"]["weights"])
+    require_ok(
+        "mesh.generate_weights live",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine", "arm_l"]}
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_first_generate = describe["scene_delta"]["weights"]
+    # Vertex 2's two candidates are exactly equidistant -- both clamp to spine's
+    # world origin -- so the tie is exact and breaks on ascending skeleton index.
+    assert [row["bone"] for row in weights_first_generate[2]] == ["spine", "arm_l"]
+    assert weights_first_generate[2][0]["weight"] == 0.5
+    assert weights_first_generate[2][1]["weight"] == 0.5
+
+    # Generation is deterministic but NOT bit-exactly idempotent, for the same
+    # reason rebind is not: BoneWorldTransform is float32 while bind offsets are
+    # double. Report the measured second-application stability; do not assert a
+    # no_change disposition the design does not guarantee.
+    generate_again = require_ok(
+        "mesh.generate_weights second application",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine", "arm_l"]}
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after the second generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    weights_second_generate = describe["scene_delta"]["weights"]
+    max_generate_delta = 0.0
+    for first_vertex, second_vertex in zip(weights_first_generate, weights_second_generate):
+        assert len(first_vertex) == len(second_vertex)
+        for first, second in zip(first_vertex, second_vertex):
+            assert first["bone"] == second["bone"], "generate must be order-stable"
+            max_generate_delta = max(
+                max_generate_delta,
+                abs(first["weight"] - second["weight"]),
+                abs(first["x"] - second["x"]),
+                abs(first["y"] - second["y"]),
+            )
+    assert max_generate_delta <= 1e-9, f"second generate moved a value by {max_generate_delta}"
+    print(
+        f"  mesh.generate_weights: second application stable to {max_generate_delta:.3e} "
+        f"(message: {generate_again['message']!r}) -- deterministic, not bit-exactly idempotent"
+    )
+    if generate_again["message"] != "Mesh weights already match the generated candidates.":
+        require_ok("undo the second generate", await client.send_command("undo"))
+    require_ok("undo mesh.generate_weights", await client.send_command("undo"))
+    describe = require_ok(
+        "mesh.describe after generate undo",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_generate
+
+    # A single candidate must take the whole weight, whatever its distance.
+    require_ok(
+        "mesh.generate_weights with one candidate",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine"], "vertices": [1]}
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after the single-candidate generate",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert len(describe["scene_delta"]["weights"][1]) == 1
+    assert describe["scene_delta"]["weights"][1][0]["bone"] == "spine"
+    assert describe["scene_delta"]["weights"][1][0]["weight"] == 1.0
+    require_ok("undo the single-candidate generate", await client.send_command("undo"))
+
+    # The advisory JSON schema did not loosen the C++ gate. Each of these is
+    # sent deliberately, including the empty `bones` array that `minItems: 1`
+    # forbids on the Python side.
+    require_rejected(
+        "mesh.generate_weights rejects a missing bones list",
+        await client.send_command("mesh.generate_weights", dict(weight_target)),
+    )
+    require_rejected(
+        "mesh.generate_weights rejects an empty bones list",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": []}
+        ),
+    )
+    unknown_bone = require_rejected(
+        "mesh.generate_weights rejects an unknown bone",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["no_such_bone"]}
+        ),
+    )
+    assert unknown_bone["error"]["code"] == "not_found"
+    require_rejected(
+        "mesh.generate_weights rejects a duplicate bone",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": ["spine", "spine"]}
+        ),
+    )
+    require_rejected(
+        "mesh.generate_weights rejects a non-string bone",
+        await client.send_command(
+            "mesh.generate_weights", {**weight_target, "bones": [7]}
+        ),
+    )
+    require_rejected(
+        "mesh.generate_weights rejects an out-of-range vertex",
+        await client.send_command(
+            "mesh.generate_weights",
+            {**weight_target, "bones": ["spine"], "vertices": [99]},
+        ),
+    )
+    describe = require_ok(
+        "mesh.describe after the generate rejections",
+        await client.send_command("mesh.describe", weight_target),
+    )
+    assert json.dumps(describe["scene_delta"]["weights"]) == weights_before_generate
+    require_ok("undo the fixture weight restore", await client.send_command("undo"))
+
+    # MAR-178: constraint.rename / constraint.delete, the 63rd and 64th
+    # operations. Read the SURVIVORS back from constraints.list rather than the
+    # return code -- the worst lifecycle failure lands on load, not on save.
+    constraints_before = json.dumps(
+        require_ok("constraints.list before MAR-178", await client.send_command("constraints.list"))[
+            "scene_delta"
+        ]
+    )
+    rename_dry = require_ok(
+        "constraint.rename dry-run",
+        await client.send_command(
+            "constraint.rename",
+            {
+                "family": "transform",
+                "from": "editor_transform_follow",
+                "to": "transform_follow_v2",
+                "dry_run": True,
+            },
+        ),
+    )
+    assert rename_dry["scene_delta"]["dry_run"] is True
+    assert rename_dry["scene_delta"]["ownership"] == "project"
+    assert rename_dry["scene_delta"]["skins"] == []
+    assert rename_dry["scene_delta"]["skin_reference_count"] == 0
+    assert json.dumps(
+        require_ok(
+            "constraints.list after the dry run", await client.send_command("constraints.list")
+        )["scene_delta"]
+    ) == constraints_before
+
+    rename_live = require_ok(
+        "constraint.rename live",
+        await client.send_command(
+            "constraint.rename",
+            {
+                "family": "transform",
+                "from": "editor_transform_follow",
+                "to": "transform_follow_v2",
+            },
+        ),
+    )
+    # The dry-run payload must equal the live payload apart from `dry_run`.
+    dry_delta = dict(rename_dry["scene_delta"])
+    del dry_delta["dry_run"]
+    assert dry_delta == rename_live["scene_delta"], (
+        f"dry-run and live scene_delta diverged: {dry_delta} vs {rename_live['scene_delta']}"
+    )
+    after_rename = json.dumps(
+        require_ok(
+            "constraints.list after the rename", await client.send_command("constraints.list")
+        )["scene_delta"]
+    )
+    assert "transform_follow_v2" in after_rename
+    assert "editor_transform_follow" not in after_rename
+
+    # AC5's export-preview leg: the export must no longer name the old
+    # constraint, and it must still be produced at all.
+    export_after_rename = require_ok(
+        "export.preview after the rename",
+        await client.send_command("export.preview", {"binary": True}),
+    )
+    assert "editor_transform_follow" not in json.dumps(export_after_rename["scene_delta"])
+    require_ok(
+        "export_runtime after the rename",
+        await client.send_command("export_runtime", {"binary": True}),
+    )
+
+    require_ok("undo constraint.rename", await client.send_command("undo"))
+    assert json.dumps(
+        require_ok(
+            "constraints.list after the rename undo",
+            await client.send_command("constraints.list"),
+        )["scene_delta"]
+    ) == constraints_before
+
+    require_ok(
+        "constraint.delete live",
+        await client.send_command(
+            "constraint.delete", {"family": "physics", "name": "editor_ribbon_secondary"}
+        ),
+    )
+    survivors = json.dumps(
+        require_ok(
+            "constraints.list after the delete", await client.send_command("constraints.list")
+        )["scene_delta"]
+    )
+    assert "editor_ribbon_secondary" not in survivors
+    for survivor in ("editor_arm_reach", "editor_guide_follow", "editor_transform_follow"):
+        assert survivor in survivors, f"the delete dropped the unrelated {survivor}"
+    require_ok("undo constraint.delete", await client.send_command("undo"))
+    assert json.dumps(
+        require_ok(
+            "constraints.list after the delete undo",
+            await client.send_command("constraints.list"),
+        )["scene_delta"]
+    ) == constraints_before
+
+    # Both surfaces reject identically; the dry run runs the live preflight.
+    rejected_dry = require_rejected(
+        "constraint.rename dry-run rejects an unchanged target",
+        await client.send_command(
+            "constraint.rename",
+            {
+                "family": "ik",
+                "from": "editor_arm_reach",
+                "to": "editor_arm_reach",
+                "dry_run": True,
+            },
+        ),
+    )
+    rejected_live = require_rejected(
+        "constraint.rename live rejects an unchanged target",
+        await client.send_command(
+            "constraint.rename",
+            {"family": "ik", "from": "editor_arm_reach", "to": "editor_arm_reach"},
+        ),
+    )
+    assert rejected_dry["message"] == rejected_live["message"], (
+        "a hand-written dry-run check drifts from the primitive's message"
+    )
+    require_rejected(
+        "constraint.rename rejects an unknown family",
+        await client.send_command(
+            "constraint.rename",
+            {"family": "bone", "from": "editor_arm_reach", "to": "arm_v2"},
+        ),
+    )
+    wrong_family = require_rejected(
+        "constraint.rename rejects a right name in the wrong family",
+        await client.send_command(
+            "constraint.rename",
+            {"family": "ik", "from": "editor_ribbon_secondary", "to": "arm_v2"},
+        ),
+    )
+    assert wrong_family["error"]["code"] == "not_found"
+    print(
+        "  MAR-178: constraint.rename/delete round-tripped through dry run, live, "
+        f"read-back, undo and export; a refused rename reports '{rejected_live['message']}'."
+    )
+
+    # MAR-179: the three IK fields the handler never read, end to end over the
+    # socket. The read-back channel for parameter values is the operation's own
+    # dry run -- constraints.list reports only identity for every family.
+    ik_before = require_ok(
+        "edit_ik_constraint read-back before MAR-179",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    for key in ("softness", "compress", "stretch", "bend_positive", "bones", "target"):
+        assert key in ik_before, (
+            f"edit_ik_constraint's dry run does not report '{key}': {ik_before}"
+        )
+
+    ik_dry = require_ok(
+        "edit_ik_constraint MAR-179 dry run",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "softness": 9.25,
+            "compress": True,
+            "stretch": True,
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    assert ik_dry["softness"] == 9.25
+    assert ik_dry["compress"] is True
+    assert ik_dry["stretch"] is True
+
+    ik_live = require_ok(
+        "edit_ik_constraint MAR-179 live",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "softness": 9.25,
+            "compress": True,
+            "stretch": True,
+        }),
+    )["scene_delta"]
+    ik_dry_as_live = dict(ik_dry)
+    ik_dry_as_live["dry_run"] = False
+    assert ik_live == ik_dry_as_live, (
+        f"the live scene_delta differs from the dry run by more than 'dry_run': "
+        f"{ik_live} vs {ik_dry_as_live}"
+    )
+
+    ik_after = require_ok(
+        "edit_ik_constraint read-back after the live edit",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    assert ik_after["softness"] == 9.25
+    assert ik_after["compress"] is True
+    assert ik_after["stretch"] is True
+
+    negative_softness = require_rejected(
+        "edit_ik_constraint rejects a negative softness",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "softness": -1,
+        }),
+    )
+    assert negative_softness["message"] == "ik constraint softness must be non-negative."
+
+    require_ok("undo edit_ik_constraint MAR-179", await client.send_command("undo"))
+    ik_undone = require_ok(
+        "edit_ik_constraint read-back after the undo",
+        await client.send_command("edit_ik_constraint", {
+            "name": "editor_arm_reach",
+            "dry_run": True,
+        }),
+    )["scene_delta"]
+    assert ik_undone == ik_before, (
+        f"undo did not restore the original IK parameters: {ik_undone} vs {ik_before}"
+    )
+    print(
+        "  MAR-179: edit_ik_constraint carries softness/compress/stretch through "
+        "dry run, live, read-back and undo; the live scene_delta matches the dry "
+        f"run apart from 'dry_run'; a negative softness reports "
+        f"'{negative_softness['message']}'."
+    )
+
     require_ok("agent.permissions.describe", await client.send_command("agent.permissions.describe"))
     require_ok("agent.pause", await client.send_command("agent.pause"))
     require_rejected(
@@ -772,6 +1967,49 @@ async def test(parameter_only=False):
         )
     )
     require_ok("agent.resume", await client.send_command("agent.resume"))
+
+    # MAR-189 M2 -- a live dry run returns the PLAN, not a four-key preview.
+    psd_dry_run = require_ok(
+        "import.psd_layers dry run",
+        await client.send_command(
+            "import.psd_layers",
+            {
+                "input": "assets/fixtures/psd_import_sample.psd",
+                "staging_root": "/tmp/marrow_mcp_psd_plan",
+                "dry_run": True,
+            },
+        ),
+    )
+    psd_plan = psd_dry_run["scene_delta"]["plan"]
+    for count in ("added", "updated", "missing"):
+        assert count in psd_plan, (
+            f"import.psd_layers' dry run must report '{count}'; got {sorted(psd_plan)}"
+        )
+    assert isinstance(psd_plan["layers"], list) and psd_plan["layers"], (
+        "import.psd_layers' dry run must return the ordered layer rows"
+    )
+    assert psd_plan["digest"], "the dry run must return the plan digest"
+
+    # MAR-189 M3 -- a non-dry run queues a review carrying that digest. Approval
+    # is deliberately NOT reachable from MCP: it stays editor-only, following
+    # agent.resume's "only the editor can restore access" precedent.
+    psd_review = require_ok(
+        "import.psd_layers review",
+        await client.send_command(
+            "import.psd_layers",
+            {
+                "input": "assets/fixtures/psd_import_sample.psd",
+                "staging_root": "/tmp/marrow_mcp_psd_plan",
+                "dry_run": False,
+            },
+        ),
+    )
+    assert psd_review["review"]["required"] is True, (
+        "a non-dry import.psd_layers must require review"
+    )
+    assert psd_review["review"]["plan_digest"], (
+        "the queued review must carry the digest of the plan the reviewer saw"
+    )
 
     require_ok("undo", await client.send_command("undo"))
     print("mcp test_client: PASSED")

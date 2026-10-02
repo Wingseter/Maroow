@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -22,6 +23,8 @@
 
 #include "marrow/marrow_c.h"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/diagnostics.hpp"
+#include "marrow/editor/project.hpp"
 #include "marrow/runtime/json.hpp"
 
 namespace {
@@ -36,7 +39,7 @@ struct OperationExpectation {
     bool dry_run_supported;
 };
 
-constexpr std::array<OperationExpectation, 56> kExpectedOperations{{
+constexpr std::array<OperationExpectation, 66> kExpectedOperations{{
     {"operations.list", "inspection", false, false, false},
     {"scene.describe", "inspection", false, false, false},
     {"bones.list", "inspection", false, false, false},
@@ -69,6 +72,10 @@ constexpr std::array<OperationExpectation, 56> kExpectedOperations{{
     {"animation.delete", "edit", true, false, true},
     {"animation.set_duration", "edit", true, false, true},
     {"timeline.retime_keyframes", "edit", true, false, true},
+    {"timeline.set_interpolation", "edit", true, false, true},
+    {"timeline.set_curve_mode", "edit", true, false, true},
+    {"timeline.set_loop_sync", "edit", true, false, true},
+    {"timeline.scale_key_times", "edit", true, false, true},
     {"set_transform", "edit", true, false, true},
     {"remove_transform_keyframe", "edit", true, false, false},
     {"set_event_keyframe", "edit", true, false, true},
@@ -77,14 +84,20 @@ constexpr std::array<OperationExpectation, 56> kExpectedOperations{{
     {"remove_deform_keyframe", "edit", true, false, false},
     {"set_vertex_weights", "edit", true, false, true},
     {"normalize_weights", "edit", true, false, true},
+    {"mesh.rebind_weights", "edit", true, false, true},
+    {"mesh.generate_weights", "edit", true, false, true},
     {"edit_ik_constraint", "edit", true, false, true},
     {"edit_path_constraint", "edit", true, false, true},
     {"edit_transform_constraint", "edit", true, false, true},
     {"edit_physics_constraint", "edit", true, false, true},
+    {"constraint.rename", "edit", true, false, true},
+    {"constraint.delete", "edit", true, false, true},
     {"set_slot_color_keyframe", "edit", true, false, true},
     {"remove_slot_color_keyframe", "edit", true, false, false},
     {"set_attachment_keyframe", "edit", true, false, true},
     {"remove_attachment_keyframe", "edit", true, false, false},
+    {"set_inherit_keyframe", "edit", true, false, true},
+    {"remove_inherit_keyframe", "edit", true, false, false},
     {"set_draw_order_keyframe", "edit", true, false, true},
     {"remove_draw_order_keyframe", "edit", true, false, false},
     {"save", "management", true, true, false},
@@ -152,6 +165,25 @@ public:
     void set_project(MarrowProject* project) {
         project_ = project;
         last_activity_id_ = 0U;
+    }
+
+    /// Dispatches a command WITHOUT the harness's own JSON pre-parse, so a
+    /// payload the parser itself refuses can still be asserted on.
+    bool dispatch_rejects(std::string_view command) {
+        MarrowStringView result{};
+        const std::string command_copy(command);
+        const MarrowStatusCode status =
+            marrow_editor_agent_dispatch(project_, command_copy.c_str(), &result);
+        if (status != MARROW_STATUS_OK || result.data == nullptr) {
+            return true;
+        }
+        const json::LoadResult parsed =
+            json::parse_document(std::string_view(result.data, result.size));
+        if (!parsed || !parsed.document->root.is_object()) {
+            return true;
+        }
+        const json::Value* ok = json::find_member(parsed.document->root, "ok");
+        return ok == nullptr || !ok->is_boolean() || !ok->as_boolean();
     }
 
     void expect(bool condition, std::string_view label, std::string_view detail) {
@@ -589,6 +621,344 @@ void expect_revision_advanced(
         std::string(revision_name) + " did not advance");
 }
 
+// ===========================================================================
+// MAR-186 -- the structured `project.diagnostics` payload over the C ABI.
+//
+// The four legacy members keep their exact names, types and expressions; only
+// `issue_count` and `issues` are added. The regression witnesses for that are
+// the assertions this story did NOT touch: `review_queue_count` after six
+// reviews, `project_dirty` unchanged across queueing them, and -- the strictest
+// and the one neither governing document recorded -- the "dry-run project
+// immutability" check, which compares the WHOLE compacted `scene_delta` of
+// `project.diagnostics` before and after a run of dry-run operations.
+// ===========================================================================
+
+const json::Value* array_member(const json::Value* object, std::string_view name) {
+    const json::Value* value = member(object, name);
+    return value != nullptr && value->is_array() ? value : nullptr;
+}
+
+/// A1 -- every legacy member survives, by name and by JSON type, and the two
+/// new members are present with `player_idle.marrow`'s issue-free values.
+void check_mar186_legacy_shape(
+    Harness& harness,
+    const DispatchObservation& diagnostics) {
+    const json::Value* delta = diagnostics.scene_delta();
+    harness.expect(
+        number_member(delta, "error_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'error_count' as a number");
+    harness.expect(
+        number_member(delta, "warning_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'warning_count' as a number");
+    harness.expect(
+        bool_member(delta, "project_dirty").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'project_dirty' as a boolean");
+    harness.expect(
+        number_member(delta, "review_queue_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'review_queue_count'. AC3 "
+        "requires all four legacy members to survive");
+    harness.expect(
+        number_member(delta, "issue_count").has_value(),
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'issue_count' as a number");
+    const json::Value* issues = array_member(delta, "issues");
+    harness.expect(
+        issues != nullptr,
+        "MAR-186 A1",
+        "the project.diagnostics payload is missing 'issues' as an array");
+    if (issues != nullptr) {
+        harness.expect(
+            issues->as_array().empty() &&
+                number_member(delta, "issue_count") == std::optional<double>(0.0),
+            "MAR-186 A1",
+            "player_idle.marrow is issue-free, so 'issues' must be empty and "
+            "'issue_count' zero");
+    }
+
+    // A2's clean half -- AC3's numeric compatibility. On a project with no
+    // other warnings, `warning_count` is still exactly the shipped
+    // `session.dirty() ? 1 : 0`.
+    const auto dirty = bool_member(delta, "project_dirty");
+    const auto warnings = number_member(delta, "warning_count");
+    const auto errors = number_member(delta, "error_count");
+    harness.expect(
+        dirty.has_value() && warnings.has_value() &&
+            warnings == std::optional<double>(*dirty ? 1.0 : 0.0),
+        "MAR-186 A2",
+        "warning_count is no longer numerically the legacy dirty ? 1 : 0 on an "
+        "issue-free project");
+    harness.expect(
+        errors == std::optional<double>(0.0),
+        "MAR-186 A2",
+        "error_count is no longer 0 on an issue-free project");
+}
+
+/// Builds A3-A5's throwaway project: one Error and two Warnings, plus a
+/// separate one carrying the fix-less `weights.uncanonicalizable`.
+bool write_mar186_issue_project(
+    const std::filesystem::path& path,
+    bool uncanonicalizable) {
+    const auto loaded =
+        marrow::editor::load_project("assets/fixtures/player_idle.marrow");
+    if (!loaded) {
+        return false;
+    }
+    marrow::editor::ProjectData project = *loaded.project;
+    project.source_path = path;
+    // The fixture stores its runtime asset paths RELATIVE to its own directory,
+    // so writing the copy into a scratch directory would leave them dangling
+    // and `load_project` would refuse it. Absolutise them.
+    project.runtime_assets.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/player_idle.mskl");
+    project.runtime_assets.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+
+    // 1 Error: an orphan transform overlay naming an animation nothing authors.
+    marrow::editor::TransformTimelineEdit orphan;
+    orphan.animation_name = "ghost";
+    orphan.bone_name = "arm_l";
+    orphan.channel = marrow::editor::TransformTimelineChannel::Rotate;
+    orphan.keyframes.push_back({});
+    project.transform_timeline_edits.push_back(orphan);
+
+    // 1 Warning: a non-canonical weight vertex.
+    //
+    // Built from the PUBLIC runtime geometry rather than through
+    // `mesh_weight_model`: that header lives in `src/editor/` and this binary
+    // does not add that include directory (only `marrow_project_smoke` does,
+    // for its own use). The vertex COUNT still has to match the attachment --
+    // a mismatch makes the project unopenable -- so it is read off the mesh.
+    const auto body_slot = loaded.skeleton_data->find_slot_index("body");
+    const auto* attachment = body_slot.has_value()
+        ? loaded.skeleton_data->find_attachment("mesh_base", *body_slot, "body_mesh")
+        : nullptr;
+    if (attachment == nullptr || attachment->mesh_geometry == nullptr) {
+        return false;
+    }
+    const std::size_t vertex_count = attachment->mesh_geometry->weights.size();
+    if (vertex_count == 0U) {
+        return false;
+    }
+    marrow::editor::MeshWeightAttachmentEdit weights;
+    weights.skin_name = "mesh_base";
+    weights.slot_name = "body";
+    weights.attachment_name = "body_mesh";
+    for (std::size_t index = 0; index < vertex_count; ++index) {
+        marrow::editor::MeshWeightVertexEdit vertex;
+        if (index == 0U && uncanonicalizable) {
+            // Below kMeshWeightEpsilon: the canonicalizer rejects it outright,
+            // and no safe fix exists.
+            vertex.influences = {{"spine", 0.0, 0.0, 1e-9}};
+        } else if (index == 0U) {
+            // Ascending weight order: non-canonical, and far enough from the
+            // fixed point that no serializer rounding can remove it.
+            vertex.influences = {
+                {"spine", 0.0, 0.0, 0.25}, {"arm_l", 0.0, 0.0, 0.75}};
+        } else {
+            // Canonical: descending, unit sum. These must produce NO issue, or
+            // the identity assertions below would be measuring the wrong thing.
+            vertex.influences = {{"spine", 0.0, 0.0, 1.0}};
+        }
+        weights.vertices.push_back(vertex);
+    }
+    project.mesh_weight_attachment_edits = {weights};
+
+    // 1 Warning: a stale preview skin.
+    project.editor_metadata.preview_skins = {"default", "ghost_skin"};
+
+    return static_cast<bool>(marrow::editor::save_project(project, path));
+}
+
+/// A3-A5 over the wire, on a project that actually carries issues.
+bool exercise_mar186_diagnostics(Harness& harness) {
+    const auto unique_suffix =
+        std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        ("marrow-mar186-agent-" + std::to_string(unique_suffix));
+    std::error_code ignored;
+    std::filesystem::create_directories(directory, ignored);
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored_error;
+            std::filesystem::remove_all(path, ignored_error);
+        }
+    } cleanup{directory};
+
+    const std::filesystem::path issue_path = directory / "mar186_issues.marrow";
+    if (!write_mar186_issue_project(issue_path, false)) {
+        harness.expect(false, "MAR-186 A3", "could not author the issue project");
+        return false;
+    }
+
+    MarrowProject* issue_project = nullptr;
+    if (marrow_editor_project_load(issue_path.string().c_str(), &issue_project) !=
+            MARROW_STATUS_OK ||
+        issue_project == nullptr) {
+        MarrowStringView error{};
+        marrow_get_last_error_message(&error);
+        harness.expect(
+            false,
+            "MAR-186 A3",
+            std::string(error.data ? error.data : "", error.size));
+        return false;
+    }
+    harness.set_project(issue_project);
+
+    const DispatchObservation first = harness.invoke(
+        "MAR-186 A3 project.diagnostics", "{\"op\":\"project.diagnostics\"}");
+    const json::Value* delta = first.scene_delta();
+    const auto dirty = bool_member(delta, "project_dirty");
+    const json::Value* issues = array_member(delta, "issues");
+    harness.expect(
+        issues != nullptr,
+        "MAR-186 A3",
+        "the payload carries no 'issues' array");
+    if (issues == nullptr) {
+        marrow_editor_project_destroy(issue_project);
+        return false;
+    }
+    harness.expect(
+        number_member(delta, "issue_count") ==
+            std::optional<double>(static_cast<double>(issues->as_array().size())),
+        "MAR-186 A3",
+        "issue_count disagrees with the length of the issues array");
+    harness.expect(
+        number_member(delta, "error_count") == std::optional<double>(1.0),
+        "MAR-186 A3",
+        "expected exactly one Error issue over the wire");
+    harness.expect(
+        dirty.has_value() &&
+            number_member(delta, "warning_count") ==
+                std::optional<double>(*dirty ? 3.0 : 2.0),
+        "MAR-186 A3",
+        "expected two project warnings plus the unsaved-changes warning only "
+        "when the session is dirty");
+
+    // Each issue object, by name. The identities are the contract MAR-187
+    // consumes, so they are asserted in full rather than counted.
+    std::vector<std::string> identities;
+    for (const json::Value& issue : issues->as_array()) {
+        const auto identity = string_member(&issue, "identity");
+        harness.expect(
+            identity.has_value(),
+            "MAR-186 A3",
+            "an issue object carries no 'identity' string");
+        if (identity.has_value()) {
+            identities.emplace_back(*identity);
+        }
+        harness.expect(
+            string_member(&issue, "code").has_value() &&
+                string_member(&issue, "severity").has_value() &&
+                string_member(&issue, "message").has_value(),
+            "MAR-186 A3",
+            "an issue object is missing code, severity or message");
+        const json::Value* target = member(&issue, "target");
+        harness.expect(
+            string_member(target, "panel").has_value(),
+            "MAR-186 A3",
+            "an issue target carries no 'panel' string");
+    }
+    std::sort(identities.begin(), identities.end());
+    const std::vector<std::string> expected_identities = {
+        "overlay.orphan_animation|transform|ghost|arm_l|rotate",
+        "preview.stale_skin|ghost_skin",
+        "weights.non_canonical|mesh_base|body|body_mesh|0",
+    };
+    harness.expect(
+        identities == expected_identities,
+        "MAR-186 A3",
+        "the wire identities are not the three expected ones");
+
+    // The typed selection reaches the wire: MAR-187 navigates through it.
+    bool saw_bone_selection = false;
+    bool saw_attachment_selection = false;
+    for (const json::Value& issue : issues->as_array()) {
+        const json::Value* selection = member(member(&issue, "target"), "selection");
+        const auto kind = string_member(selection, "kind");
+        if (kind == std::optional<std::string_view>("bone")) {
+            saw_bone_selection = true;
+        } else if (kind == std::optional<std::string_view>("attachment")) {
+            saw_attachment_selection = true;
+        }
+    }
+    harness.expect(
+        saw_bone_selection && saw_attachment_selection,
+        "MAR-186 A3",
+        "the wire issues carry no typed bone and attachment selections");
+
+    // A5 -- inspection dirties nothing. Three consecutive calls must agree
+    // exactly, and a following runtime.validate must still pass.
+    const std::string first_payload = compact_scene_delta(first);
+    const DispatchObservation second = harness.invoke(
+        "MAR-186 A5 project.diagnostics repeat 1", "{\"op\":\"project.diagnostics\"}");
+    const DispatchObservation third = harness.invoke(
+        "MAR-186 A5 project.diagnostics repeat 2", "{\"op\":\"project.diagnostics\"}");
+    harness.expect(
+        compact_scene_delta(second) == first_payload &&
+            compact_scene_delta(third) == first_payload,
+        "MAR-186 A5",
+        "three consecutive project.diagnostics calls did not agree exactly");
+    harness.invoke(
+        "MAR-186 A5 runtime.validate after inspection",
+        "{\"op\":\"runtime.validate\"}");
+
+    marrow_editor_project_destroy(issue_project);
+
+    // A4 -- the absent safe fix is an ABSENT KEY, not an empty string. No C++
+    // case can see this: `DiagnosticIssue::safe_fix_id` IS the empty string in
+    // both worlds, and the difference exists only in the serialized object.
+    const std::filesystem::path fixless_path = directory / "mar186_fixless.marrow";
+    if (!write_mar186_issue_project(fixless_path, true)) {
+        harness.expect(false, "MAR-186 A4", "could not author the fix-less project");
+        return false;
+    }
+    MarrowProject* fixless_project = nullptr;
+    if (marrow_editor_project_load(fixless_path.string().c_str(), &fixless_project) !=
+            MARROW_STATUS_OK ||
+        fixless_project == nullptr) {
+        harness.expect(false, "MAR-186 A4", "the fix-less project failed to load");
+        return false;
+    }
+    harness.set_project(fixless_project);
+    const DispatchObservation fixless = harness.invoke(
+        "MAR-186 A4 project.diagnostics", "{\"op\":\"project.diagnostics\"}");
+    const json::Value* fixless_issues = array_member(fixless.scene_delta(), "issues");
+    bool saw_uncanonicalizable = false;
+    bool absent_key = true;
+    for (const json::Value* issues_value = fixless_issues;
+         issues_value != nullptr;
+         issues_value = nullptr) {
+        for (const json::Value& issue : issues_value->as_array()) {
+            if (string_member(&issue, "code") !=
+                std::optional<std::string_view>("weights.uncanonicalizable")) {
+                continue;
+            }
+            saw_uncanonicalizable = true;
+            if (json::find_member(issue, "safe_fix_id") != nullptr) {
+                absent_key = false;
+            }
+        }
+    }
+    harness.expect(
+        saw_uncanonicalizable,
+        "MAR-186 A4",
+        "the fix-less project produced no weights.uncanonicalizable issue");
+    harness.expect(
+        absent_key,
+        "MAR-186 A4",
+        "the weights.uncanonicalizable issue object carries a 'safe_fix_id' "
+        "member, expected the key to be absent -- an empty string is a value a "
+        "careless consumer treats as present");
+    marrow_editor_project_destroy(fixless_project);
+    return true;
+}
+
 bool exercise_parameter_operations(Harness& harness) {
     constexpr const char* kParameterProjectPath =
         "assets/fixtures/parameter_face_basic.marrow";
@@ -970,11 +1340,13 @@ int main(int argc, char** argv) {
             "registered operation is missing its handler");
     }
 
-    const std::array<std::filesystem::path, 5> reviewed_temp_targets{{
+    // MAR-189 removed the two `import.psd_layers` entries: that op no longer takes
+    // a caller-supplied output, so there is no deterministic temp target for it to
+    // leave behind. Its immutability clause is A1's byte map over the project
+    // bundle instead, which is a stronger statement than "this one path is absent".
+    const std::array<std::filesystem::path, 3> reviewed_temp_targets{{
         "/tmp/agent_spine_import_sample.mskl",
         "/tmp/agent_spine_import_sample.matl",
-        "/tmp/agent_psd_import_sample.mskl",
-        "/tmp/agent_psd_import_sample.matl",
         "/tmp/agent_atlas_pack_sample.matl",
     }};
     for (const auto& target : reviewed_temp_targets) {
@@ -984,6 +1356,29 @@ int main(int argc, char** argv) {
             !error,
             "review target setup",
             "could not clear deterministic target " + target.string());
+    }
+
+    // MAR-189 A7. The whole TRACKED bundle, not just the `.marrow`. This story
+    // gives `import.psd_layers` project-derived write targets, and the one way it
+    // damages the repository is by proving it can replace a bundle while pointed at
+    // the tracked one. `assets/fixtures/player_idle.matl` declares
+    // `"image": "player_fixture.png"`, so the texture is named from the atlas
+    // document rather than from the atlas's own stem.
+    std::vector<FileSnapshot> tracked_bundle_before;
+    for (const char* tracked : {
+             "assets/fixtures/player_idle.marrow",
+             "assets/fixtures/player_idle.mskl",
+             "assets/fixtures/player_idle.matl",
+             "assets/fixtures/player_idle.mbin",
+             "assets/fixtures/player_fixture.png",
+             "assets/fixtures/psd_import_sample.psd",
+         }) {
+        FileSnapshot snapshot = snapshot_file(tracked);
+        harness.expect(
+            snapshot.exists && snapshot.bytes.has_value(),
+            "MAR-189 A7 setup",
+            std::string(tracked) + " must exist before the run");
+        tracked_bundle_before.push_back(std::move(snapshot));
     }
 
     const FileSnapshot project_file_before = snapshot_file(project_path);
@@ -1026,6 +1421,8 @@ int main(int argc, char** argv) {
         "editor_arm_reach");
     (void)exercise_parameter_operations(harness);
     harness.set_project(project);
+    (void)exercise_mar186_diagnostics(harness);
+    harness.set_project(project);
     const DispatchObservation initial_timeline = harness.invoke(
         "timeline.describe initial",
         "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");
@@ -1056,6 +1453,7 @@ int main(int argc, char** argv) {
         "project.diagnostics initial",
         "{\"op\":\"project.diagnostics\"}");
     expect_scene_contains(harness, "project.diagnostics initial", initial_diagnostics, "error_count");
+    check_mar186_legacy_shape(harness, initial_diagnostics);
 
     const DispatchObservation export_preview = harness.invoke(
         "export.preview",
@@ -1159,7 +1557,10 @@ int main(int argc, char** argv) {
     harness.invoke(
         "set_vertex_weights dry-run",
         "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
-        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"dry_run\":true}}");
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":1,\"influences\":[{\"bone\":\"spine\",\"x\":60,\"y\":0,"
+        "\"weight\":0.5},{\"bone\":\"arm_l\",\"x\":20,\"y\":0,\"weight\":0.5}]}],"
+        "\"dry_run\":true}}");
     harness.invoke(
         "normalize_weights dry-run",
         "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
@@ -1241,12 +1642,15 @@ int main(int argc, char** argv) {
         "{\"op\":\"import.spine_atlas\",\"args\":{"
         "\"input\":\"assets/fixtures/spine_import_sample.atlas\","
         "\"output\":\"/tmp/agent_spine_import_sample.matl\",\"dry_run\":true}}");
+    // MAR-189: `import.psd_layers` replaces the PROJECT's own bundle, so the
+    // targets are project-derived and a `/tmp` output is now a `not_project_bundle`
+    // refusal (A2). Only the staging root is caller-supplied, and it is
+    // whitelist-checked like any other write target.
     harness.invoke(
         "import.psd_layers dry-run",
         "{\"op\":\"import.psd_layers\",\"args\":{"
         "\"input\":\"assets/fixtures/psd_import_sample.psd\","
-        "\"output\":\"/tmp/agent_psd_import_sample.mskl\","
-        "\"atlas_output\":\"/tmp/agent_psd_import_sample.matl\",\"dry_run\":true}}");
+        "\"staging_root\":\"/tmp/agent_psd_dry_run\",\"dry_run\":true}}");
     harness.invoke(
         "atlas.pack dry-run",
         "{\"op\":\"atlas.pack\",\"args\":{"
@@ -1385,6 +1789,1305 @@ int main(int argc, char** argv) {
         "atomic retime metadata changed");
     harness.invoke("undo timeline retime", "{\"op\":\"undo\"}");
 
+    // --- MAR-169: timeline.set_interpolation. The dry run doubles as the
+    // read-back channel, reporting each selected key's current curve without
+    // mutating anything. ---
+    {
+        const char* kTranslateKey =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.0}";
+        const auto previous_curve = [&](const DispatchObservation& observation)
+            -> const json::Value* {
+            const json::Value* keys = member(observation.scene_delta(), "keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&keys->as_array()[0], "previous_interpolation");
+        };
+        const auto curve_is_string = [&](const json::Value* curve,
+                                         std::string_view expected) {
+            return curve != nullptr && curve->is_string() &&
+                curve->as_string() == expected;
+        };
+        const auto curve_matches = [&](const json::Value* curve,
+                                       const std::array<double, 4>& expected) {
+            if (curve == nullptr || !curve->is_array() ||
+                curve->as_array().size() != 4U) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                const json::Value& value = curve->as_array()[index];
+                if (!value.is_number() ||
+                    std::abs(value.as_number() - expected[index]) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        const DispatchObservation before_revision = harness.invoke(
+            "scene.describe before interpolation dry run", "{\"op\":\"scene.describe\"}");
+        (void)before_revision;
+        const DispatchObservation interpolation_dry_run = harness.invoke(
+            "timeline.set_interpolation dry run",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey +
+                "],\"interpolation\":[0.2,-0.4,0.8,1.6],\"dry_run\":true}}");
+        harness.expect(
+            bool_member(interpolation_dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(interpolation_dry_run.scene_delta(), "key_count") ==
+                    std::optional<double>(1.0) &&
+                number_member(
+                    interpolation_dry_run.scene_delta(), "changed_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(interpolation_dry_run.scene_delta(), "keys_truncated") ==
+                    std::optional<bool>(false) &&
+                curve_is_string(previous_curve(interpolation_dry_run), "linear"),
+            "timeline.set_interpolation dry run",
+            "dry run did not report the current curve of every selected key");
+
+        const DispatchObservation interpolation_live = harness.invoke(
+            "timeline.set_interpolation",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[0.2,-0.4,0.8,1.6]}}");
+        harness.expect(
+            number_member(interpolation_live.scene_delta(), "changed_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(interpolation_live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false),
+            "timeline.set_interpolation live",
+            "a live easing write did not report its changed key count");
+
+        const DispatchObservation read_back = harness.invoke(
+            "timeline.set_interpolation read-back",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_matches(previous_curve(read_back), {0.2, -0.4, 0.8, 1.6}),
+            "timeline.set_interpolation read-back",
+            "the stored overshoot curve did not survive the live write");
+
+        // A second identical live call changes nothing.
+        harness.invoke(
+            "timeline.set_interpolation no_change",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[0.2,-0.4,0.8,1.6]}}",
+            false,
+            "no_change");
+
+        // A slot-colour key and a deform key are both supported families.
+        harness.invoke(
+            "timeline.set_interpolation slot_color",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\","
+            "\"time\":0.0}],\"interpolation\":[0.1,0.9,0.4,0.2]}}");
+        harness.invoke(
+            "timeline.set_interpolation deform",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+            "\"attachment\":\"body_mesh\",\"time\":0.0}],"
+            "\"interpolation\":[0.15,0.85,0.45,0.25]}}");
+        harness.invoke("undo interpolation deform", "{\"op\":\"undo\"}");
+        harness.invoke("undo interpolation slot_color", "{\"op\":\"undo\"}");
+
+        // Undo restores the previous curve, verified through a follow-up dry run.
+        harness.invoke("undo timeline interpolation", "{\"op\":\"undo\"}");
+        const DispatchObservation after_undo = harness.invoke(
+            "timeline.set_interpolation after undo",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_undo), "linear"),
+            "undo timeline interpolation",
+            "undo did not restore the previous curve");
+
+        // Rejections. Each leaves the project untouched, which the follow-up
+        // read-back proves.
+        harness.invoke(
+            "timeline.set_interpolation requires interpolation",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects out-of-range x",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[1.5,0.0,0.5,1.0]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects a short array",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":[0.0,0.0,0.5]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects an unknown kind string",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"quadratic\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects draw_order keys",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"draw_order\",\"animation\":\"idle\",\"time\":0.0}],"
+            "\"interpolation\":\"linear\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects slot_attachment keys",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"slot_attachment\",\"animation\":\"idle\",\"slot\":\"body\","
+            "\"time\":0.0}],\"interpolation\":\"linear\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects an empty key list",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[],"
+            "\"interpolation\":\"linear\"}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects duplicate keys",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "," + kTranslateKey +
+                "],\"interpolation\":[0.3,0.3,0.6,0.6]}}",
+            false,
+            "invalid_request");
+        harness.invoke(
+            "timeline.set_interpolation rejects an unresolvable key",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":99.0}],"
+            "\"interpolation\":[0.3,0.3,0.6,0.6]}}",
+            false,
+            "not_found");
+        const DispatchObservation after_rejections = harness.invoke(
+            "timeline.set_interpolation unchanged after rejections",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_rejections), "linear"),
+            "timeline.set_interpolation rejection atomicity",
+            "a rejected easing request mutated the project");
+    }
+
+
+    // --- MAR-170: the four new preset tokens on the same operation. The
+    // registry stays at 57; only this one argument's vocabulary grew. ---
+    {
+        const char* kTranslateKey =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.0}";
+        const char* kSecondKey =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.5}";
+        const auto previous_curve = [&](const DispatchObservation& observation)
+            -> const json::Value* {
+            const json::Value* keys = member(observation.scene_delta(), "keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&keys->as_array()[0], "previous_interpolation");
+        };
+        const auto curve_is_string = [&](const json::Value* curve,
+                                         std::string_view expected) {
+            return curve != nullptr && curve->is_string() &&
+                curve->as_string() == expected;
+        };
+        const auto curve_matches = [&](const json::Value* curve,
+                                       const std::array<double, 4>& expected) {
+            if (curve == nullptr || !curve->is_array() ||
+                curve->as_array().size() != 4U) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                const json::Value& value = curve->as_array()[index];
+                if (!value.is_number() ||
+                    std::abs(value.as_number() - expected[index]) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        // Spelled out literally: a test that reads kCurvePresets proves nothing.
+        const std::array<std::pair<const char*, std::array<double, 4>>, 4> kTokens{{
+            {"ease", {0.25, 0.1, 0.25, 1.0}},
+            {"ease_in", {0.42, 0.0, 1.0, 1.0}},
+            {"ease_out", {0.0, 0.0, 0.58, 1.0}},
+            {"ease_in_out", {0.42, 0.0, 0.58, 1.0}},
+        }};
+
+        for (const auto& [token, expected] : kTokens) {
+            harness.invoke(
+                std::string("timeline.set_interpolation ") + token,
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kTranslateKey + "],\"interpolation\":\"" + token + "\"}}");
+            const DispatchObservation read_back = harness.invoke(
+                std::string("timeline.set_interpolation ") + token + " read-back",
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+            harness.expect(
+                curve_matches(previous_curve(read_back), expected),
+                std::string("timeline.set_interpolation ") + token,
+                std::string("the ") + token +
+                    " preset token did not store its fixed control points");
+            harness.invoke(
+                std::string("undo ") + token, "{\"op\":\"undo\"}");
+        }
+
+        // "linear" and "stepped" behave exactly as before.
+        harness.invoke(
+            "timeline.set_interpolation stepped preset token",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"stepped\"}}");
+        const DispatchObservation stepped_read_back = harness.invoke(
+            "timeline.set_interpolation stepped read-back",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(stepped_read_back), "stepped"),
+            "timeline.set_interpolation stepped preset token",
+            "the stepped token no longer stores a stepped curve");
+        harness.invoke("undo stepped preset token", "{\"op\":\"undo\"}");
+
+        // Hyphenated and camelCase spellings stay rejected: one spelling per
+        // concept, and the rejection must leave the project untouched.
+        for (const char* rejected : {"ease-in", "easeIn", "bounce"}) {
+            harness.invoke(
+                std::string("timeline.set_interpolation rejects ") + rejected,
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kTranslateKey + "],\"interpolation\":\"" + rejected + "\"}}",
+                false,
+                "invalid_request");
+        }
+        const DispatchObservation after_token_rejections = harness.invoke(
+            "timeline.set_interpolation unchanged after token rejections",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_token_rejections), "linear"),
+            "timeline.set_interpolation token rejection atomicity",
+            "a rejected preset token mutated the project");
+
+        // One multi-key preset call is one history entry, and undo restores
+        // every key.
+        harness.invoke(
+            "timeline.set_interpolation multi-key preset",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "," + kSecondKey +
+                "],\"interpolation\":\"ease_in_out\"}}");
+        harness.invoke("undo multi-key preset", "{\"op\":\"undo\"}");
+        const DispatchObservation after_multi_undo = harness.invoke(
+            "timeline.set_interpolation multi-key undo read-back",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kTranslateKey + "],\"interpolation\":\"ease\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(after_multi_undo), "linear"),
+            "timeline.set_interpolation multi-key preset undo",
+            "one undo did not restore every key a multi-key preset wrote");
+        const DispatchObservation second_after_multi_undo = harness.invoke(
+            "timeline.set_interpolation multi-key undo second key",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kSecondKey + "],\"interpolation\":\"ease\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(second_after_multi_undo), "stepped"),
+            "timeline.set_interpolation multi-key preset undo",
+            "one undo did not restore the second key a multi-key preset wrote");
+
+        // set_transform still creates a Linear key: a headless agent's output
+        // must not depend on the invoking human's preference file.
+        harness.invoke(
+            "set_transform without interpolation",
+            "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"channel\":\"translate\",\"time\":0.875,"
+            "\"x\":3,\"y\":4}}");
+        const DispatchObservation seeded = harness.invoke(
+            "set_transform default easing read-back",
+            "{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"translate\",\"time\":0.875}],"
+            "\"interpolation\":\"ease\",\"dry_run\":true}}");
+        harness.expect(
+            curve_is_string(previous_curve(seeded), "linear"),
+            "set_transform default easing",
+            "an agent-created key no longer defaults to Linear");
+        harness.invoke("undo agent-created key", "{\"op\":\"undo\"}");
+    }
+
+    // --- MAR-171: timeline.set_curve_mode, the 58th operation. ---
+    {
+        const char* kSpineRotate =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.0}";
+        const char* kSpineRotateSecond =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.5}";
+        const auto first_key_member = [&](const DispatchObservation& observation,
+                                          std::string_view name)
+            -> const json::Value* {
+            const json::Value* keys = member(observation.scene_delta(), "keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&keys->as_array()[0], name);
+        };
+        const auto string_is = [](const json::Value* value, std::string_view expected) {
+            return value != nullptr && value->is_string() &&
+                value->as_string() == expected;
+        };
+        const auto curve_matches = [&](const json::Value* curve,
+                                       const std::array<double, 4>& expected) {
+            if (curve == nullptr || !curve->is_array() ||
+                curve->as_array().size() != 4U) {
+                return false;
+            }
+            for (std::size_t index = 0U; index < 4U; ++index) {
+                const json::Value& value = curve->as_array()[index];
+                if (!value.is_number() ||
+                    std::abs(value.as_number() - expected[index]) > 1e-5) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        // The design's §6.6 worked example, spelled out rather than recomputed.
+        const std::array<double, 4> kSegment0{
+            1.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0, 1.0};
+
+        // A dry run reports the current mode, driver, and curve of every
+        // selected key without touching the session.
+        const DispatchObservation dry_run = harness.invoke(
+            "timeline.set_curve_mode dry run",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"angle\","
+                "\"dry_run\":true}}");
+        harness.expect(
+            bool_member(dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(dry_run.scene_delta(), "key_count") ==
+                    std::optional<double>(1.0) &&
+                string_is(member(dry_run.scene_delta(), "mode"), "auto") &&
+                string_is(member(dry_run.scene_delta(), "driver"), "angle") &&
+                string_is(first_key_member(dry_run, "previous_mode"), "manual") &&
+                first_key_member(dry_run, "previous_driver") != nullptr &&
+                first_key_member(dry_run, "previous_driver")->is_null(),
+            "timeline.set_curve_mode dry run",
+            "the dry run did not report the current mode and driver of each key");
+
+        const DispatchObservation live = harness.invoke(
+            "timeline.set_curve_mode live",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "," + kSpineRotateSecond +
+                "],\"mode\":\"auto\",\"driver\":\"angle\"}}");
+        harness.expect(
+            number_member(live.scene_delta(), "changed_key_count") ==
+                    std::optional<double>(2.0) &&
+                number_member(live.scene_delta(), "resolved_key_count") ==
+                    std::optional<double>(2.0) &&
+                bool_member(live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false),
+            "timeline.set_curve_mode live",
+            "a live curve-mode write did not report its changed and resolved counts");
+
+        const DispatchObservation read_back = harness.invoke(
+            "timeline.set_curve_mode read-back",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"angle\","
+                "\"dry_run\":true}}");
+        harness.expect(
+            string_is(first_key_member(read_back, "previous_mode"), "auto") &&
+                string_is(first_key_member(read_back, "previous_driver"), "angle") &&
+                curve_matches(
+                    first_key_member(read_back, "previous_interpolation"), kSegment0),
+            "timeline.set_curve_mode read-back",
+            "the resolved curve and recorded intent did not survive the live write");
+
+        // A second identical live call changes nothing at all.
+        harness.invoke(
+            "timeline.set_curve_mode no_change",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "," + kSpineRotateSecond +
+                "],\"mode\":\"auto\",\"driver\":\"angle\"}}",
+            false,
+            "no_change");
+
+        // timeline.set_interpolation on an auto key demotes it, proven through
+        // the Agent surface by the next dry run's previous_mode.
+        harness.invoke(
+            "timeline.set_interpolation demotes an auto key",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"interpolation\":\"ease\"}}");
+        const DispatchObservation demoted = harness.invoke(
+            "timeline.set_curve_mode after demotion",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"angle\","
+                "\"dry_run\":true}}");
+        harness.expect(
+            string_is(first_key_member(demoted, "previous_mode"), "manual"),
+            "timeline.set_interpolation demotion",
+            "writing an absolute easing did not demote the key to manual");
+        harness.invoke("undo the demotion", "{\"op\":\"undo\"}");
+
+        // A neighbour retime changes an auto key's curve in one history entry
+        // that one undo fully reverses.
+        const DispatchObservation before_retime = harness.invoke(
+            "timeline.set_curve_mode before retime",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"dry_run\":true}}");
+        harness.expect(
+            curve_matches(
+                first_key_member(before_retime, "previous_interpolation"), kSegment0),
+            "timeline.set_curve_mode undo",
+            "one undo did not restore the resolved curve");
+
+        // Explicit reconciliation: re-applying `auto` to already-auto keys
+        // succeeds and reports resolver work with no intent change.
+        harness.invoke(
+            "timeline.retime_keyframes moves an auto neighbour",
+            std::string("{\"op\":\"timeline.retime_keyframes\",\"args\":{\"keys\":[") +
+                kSpineRotateSecond + "],\"delta\":0.25}}");
+        harness.invoke("undo the neighbour retime", "{\"op\":\"undo\"}");
+
+        // Rejections, each leaving the project untouched.
+        struct CurveModeRejection {
+            const char* label;
+            std::string request;
+        };
+        const std::vector<CurveModeRejection> rejections{
+            {"missing mode",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "]}}"},
+            {"unknown mode",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"automatic\"}}"},
+            {"unknown driver",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"z\"}}"},
+            {"driver with manual",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"manual\",\"driver\":\"angle\"}}"},
+            {"driver the family does not own",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "],\"mode\":\"auto\",\"driver\":\"x\"}}"},
+            {"a deform key",
+             "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":["
+             "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+             "\"attachment\":\"body_mesh\",\"time\":0.0}],\"mode\":\"auto\"}}"},
+            {"a draw_order key",
+             "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":["
+             "{\"kind\":\"draw_order\",\"animation\":\"idle\",\"time\":0.0}],"
+             "\"mode\":\"auto\"}}"},
+            {"a duplicate selector",
+             std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                 kSpineRotate + "," + kSpineRotate + "],\"mode\":\"auto\"}}"},
+            {"an empty keys array",
+             "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[],"
+             "\"mode\":\"auto\"}}"},
+        };
+        for (const CurveModeRejection& rejection : rejections) {
+            harness.invoke(
+                std::string("timeline.set_curve_mode rejects ") + rejection.label,
+                rejection.request,
+                false,
+                "invalid_request");
+        }
+        harness.invoke(
+            "timeline.set_curve_mode rejects an unresolvable selector",
+            "{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":9.75}],\"mode\":\"auto\"}}",
+            false,
+            "not_found");
+
+        const DispatchObservation after_rejections = harness.invoke(
+            "timeline.set_curve_mode unchanged after rejections",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "],\"mode\":\"auto\",\"dry_run\":true}}");
+        harness.expect(
+            string_is(first_key_member(after_rejections, "previous_mode"), "auto") &&
+                curve_matches(
+                    first_key_member(after_rejections, "previous_interpolation"),
+                    kSegment0),
+            "timeline.set_curve_mode rejection atomicity",
+            "a rejected curve-mode request mutated the project");
+
+        // Back to manual so the rest of the smoke sees the fixture's curves.
+        harness.invoke(
+            "timeline.set_curve_mode back to manual",
+            std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                kSpineRotate + "," + kSpineRotateSecond + "],\"mode\":\"manual\"}}");
+
+        // An explicitly supplied easing on an AUTOMATIC slot-colour key must
+        // not be silently discarded by the resolver that runs after it.
+        // `set_slot_color_keyframe` writes `interpolation` directly rather than
+        // through `set_keyframe_interpolation()`, so it carries the demotion
+        // itself, exactly as the numeric inspector does.
+        {
+            const char* kBodyColor =
+                "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"time\":0.0}";
+            harness.invoke(
+                "timeline.set_curve_mode auto on a slot colour key",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBodyColor + "],\"mode\":\"auto\",\"driver\":\"r\"}}");
+
+            // Colour only, no easing argument: the key stays automatic and its
+            // curve is re-resolved against the new driver value.
+            harness.invoke(
+                "set_slot_color_keyframe without an easing keeps auto",
+                "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":0.0,\"color\":{\"r\":0.5,\"g\":0.5,\"b\":0.5,\"a\":1.0}}}");
+            const DispatchObservation still_auto = harness.invoke(
+                "slot colour key still auto after a colour-only write",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBodyColor + "],\"mode\":\"auto\",\"dry_run\":true}}");
+            harness.expect(
+                string_is(first_key_member(still_auto, "previous_mode"), "auto"),
+                "set_slot_color_keyframe colour-only",
+                "a colour-only write must leave an automatic key automatic");
+
+            // An explicit easing is an absolute authored curve: it demotes the
+            // key and survives the resolver that follows it.
+            harness.invoke(
+                "set_slot_color_keyframe with an explicit easing demotes",
+                "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":0.0,"
+                "\"color\":{\"r\":0.5,\"g\":0.5,\"b\":0.5,\"a\":1.0},"
+                "\"interpolation\":[0.2,0.3,0.7,0.8]}}");
+            const DispatchObservation demoted_color = harness.invoke(
+                "slot colour easing survived the resolver",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBodyColor + "],\"mode\":\"auto\",\"dry_run\":true}}");
+            harness.expect(
+                string_is(first_key_member(demoted_color, "previous_mode"), "manual") &&
+                    curve_matches(
+                        first_key_member(demoted_color, "previous_interpolation"),
+                        {0.2, 0.3, 0.7, 0.8}),
+                "set_slot_color_keyframe explicit easing",
+                "an explicitly supplied easing was silently discarded by the resolver");
+
+            harness.invoke("undo the explicit slot colour easing", "{\"op\":\"undo\"}");
+            harness.invoke("undo the colour-only slot write", "{\"op\":\"undo\"}");
+            harness.invoke("undo the slot colour auto mode", "{\"op\":\"undo\"}");
+        }
+
+        harness.invoke("undo back to manual", "{\"op\":\"undo\"}");
+        harness.invoke("undo the automatic application", "{\"op\":\"undo\"}");
+    }
+
+    // --- MAR-172: timeline.set_loop_sync, the 59th operation. ---
+    {
+        const char* kSpineLane =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\"}";
+        const char* kAimLane =
+            "{\"kind\":\"transform\",\"animation\":\"aim\",\"bone\":\"arm_l\","
+            "\"channel\":\"rotate\"}";
+        const auto first_lane_member = [&](const DispatchObservation& observation,
+                                           std::string_view name)
+            -> const json::Value* {
+            const json::Value* entries = member(observation.scene_delta(), "lanes");
+            if (entries == nullptr || !entries->is_array() ||
+                entries->as_array().empty()) {
+                return nullptr;
+            }
+            return member(&entries->as_array()[0], name);
+        };
+        const auto lane_string_is = [](const json::Value* value,
+                                       std::string_view expected) {
+            return value != nullptr && value->is_string() &&
+                value->as_string() == expected;
+        };
+        const auto lane_number_is = [](const json::Value* value, double expected) {
+            return value != nullptr && value->is_number() &&
+                std::abs(value->as_number() - expected) <= 1e-6;
+        };
+
+        // Enabling before an explicit duration exists is rejected, naming the
+        // remedy, and leaves the project untouched.
+        harness.invoke(
+            "timeline.set_loop_sync rejects a clip with no explicit duration",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true}}",
+            false,
+            "invalid_request");
+
+        harness.invoke(
+            "animation.set_duration for the loop boundary",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":1.5}}");
+
+        // A dry run reports the resulting boundary key without touching the
+        // session, and reports no boundary key existed before.
+        const DispatchObservation loop_dry_run = harness.invoke(
+            "timeline.set_loop_sync dry run",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            bool_member(loop_dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(loop_dry_run.scene_delta(), "lane_count") ==
+                    std::optional<double>(1.0) &&
+                number_member(loop_dry_run.scene_delta(), "created_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(loop_dry_run.scene_delta(), "lanes_truncated") ==
+                    std::optional<bool>(false) &&
+                first_lane_member(loop_dry_run, "previous_enabled") != nullptr &&
+                first_lane_member(loop_dry_run, "previous_enabled")->is_boolean() &&
+                !first_lane_member(loop_dry_run, "previous_enabled")->as_boolean() &&
+                lane_string_is(
+                    first_lane_member(loop_dry_run, "boundary_action"), "created") &&
+                lane_number_is(first_lane_member(loop_dry_run, "boundary_time"), 1.5),
+            "timeline.set_loop_sync dry run",
+            "the dry run did not report the resulting boundary key of each lane");
+
+        const DispatchObservation loop_live = harness.invoke(
+            "timeline.set_loop_sync live",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true}}");
+        harness.expect(
+            number_member(loop_live.scene_delta(), "changed_lane_count") ==
+                    std::optional<double>(1.0) &&
+                number_member(loop_live.scene_delta(), "created_key_count") ==
+                    std::optional<double>(1.0) &&
+                bool_member(loop_live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false),
+            "timeline.set_loop_sync live",
+            "a live loop-sync write did not report its changed and created counts");
+
+        // A second identical live call changes nothing at all.
+        harness.invoke(
+            "timeline.set_loop_sync no_change",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true}}",
+            false,
+            "no_change");
+
+        // A managed boundary key's value and easing are derived from the key at
+        // time zero, so an Agent write there would be reverted by the sync in
+        // the same transaction and a removal would strand the lane's contract.
+        // The GUI skips such a key and reports it; the Agent rejects it
+        // atomically, naming the remedy. This block proves both halves of the
+        // rejection: the operation fails AND the lane's authored keys survive.
+        {
+            const char* kBoundaryKey =
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":1.5}";
+            const char* kMiddleKey =
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":1.0}";
+            const auto still_there = [&](const char* label, const char* key) {
+                return harness.invoke(
+                    label,
+                    std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                        key + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+            };
+            still_there("the spine key at 1.0 exists before the guards", kMiddleKey);
+
+            harness.invoke(
+                "timeline.set_interpolation rejects a managed loop boundary",
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kBoundaryKey + "],\"interpolation\":\"ease\"}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "timeline.set_curve_mode rejects a managed loop boundary",
+                std::string("{\"op\":\"timeline.set_curve_mode\",\"args\":{\"keys\":[") +
+                    kBoundaryKey + "],\"mode\":\"auto\"}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "set_transform rejects a managed loop boundary",
+                "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":1.5,\"angle\":45}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "remove_transform_keyframe rejects a managed loop boundary",
+                "{\"op\":\"remove_transform_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":1.5}}",
+                false,
+                "invalid_request");
+            // The data-loss assertion. Before the guard existed the removal
+            // returned `ok` and the authored key at 1.0 was promoted to the
+            // boundary -- moved to 1.5 and overwritten from key 0 -- so a test
+            // that only checked the return code would have missed it.
+            still_there("the spine key at 1.0 survived the rejected removal", kMiddleKey);
+            still_there(
+                "the spine key at 0.5 survived the rejected removal",
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":0.5}");
+
+            // The same guard on the other two families, each opted in here and
+            // undone at the end of the block.
+            harness.invoke(
+                "timeline.set_loop_sync enables the colour and deform lanes",
+                "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+                "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\"},"
+                "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"attachment\":\"body_mesh\"}],\"enabled\":true}}");
+
+            harness.invoke(
+                "set_slot_color_keyframe rejects a managed loop boundary",
+                "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":1.5,"
+                "\"color\":{\"r\":0.1,\"g\":0.2,\"b\":0.3,\"a\":0.4}}}",
+                false,
+                "invalid_request");
+            harness.invoke(
+                "remove_slot_color_keyframe rejects a managed loop boundary",
+                "{\"op\":\"remove_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"time\":1.5}}",
+                false,
+                "invalid_request");
+            still_there(
+                "the body colour key at 1.0 survived the rejected removal",
+                "{\"kind\":\"slot_color\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"time\":1.0}");
+
+            harness.invoke(
+                "remove_deform_keyframe rejects a managed loop boundary",
+                "{\"op\":\"remove_deform_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"time\":1.5}}",
+                false,
+                "invalid_request");
+            still_there(
+                "the body deform key at 1.0 survived the rejected removal",
+                "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\","
+                "\"attachment\":\"body_mesh\",\"time\":1.0}");
+
+            // Every guarded operation still works on a key that is NOT the
+            // managed boundary, so the guard is boundary-specific rather than a
+            // blanket lock on an opted-in lane.
+            harness.invoke(
+                "timeline.set_interpolation still writes a non-boundary key",
+                std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                    kMiddleKey + "],\"interpolation\":\"ease\"}}");
+            harness.invoke("undo the non-boundary easing", "{\"op\":\"undo\"}");
+            harness.invoke(
+                "remove_transform_keyframe still removes a non-boundary key",
+                "{\"op\":\"remove_transform_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.5}}");
+            harness.invoke("undo the non-boundary removal", "{\"op\":\"undo\"}");
+
+            harness.invoke("undo the colour and deform enable", "{\"op\":\"undo\"}");
+        }
+
+        // set_transform on the time-zero key updates the boundary key in the
+        // SAME history entry, proven by the following dry run's read-back.
+        harness.invoke(
+            "set_transform on the time-zero key of an opted-in lane",
+            "{\"op\":\"set_transform\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"channel\":\"rotate\",\"time\":0.0,\"angle\":21}}");
+        const DispatchObservation followed = harness.invoke(
+            "timeline.set_loop_sync read-back after set_transform",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            first_lane_member(followed, "previous_boundary") != nullptr &&
+                first_lane_member(followed, "previous_boundary")->is_object() &&
+                lane_number_is(
+                    member(first_lane_member(followed, "previous_boundary"), "angle"),
+                    21.0),
+            "timeline.set_loop_sync follows the first key",
+            "the boundary key did not follow the time-zero key in the same entry");
+        harness.invoke("undo the time-zero transform", "{\"op\":\"undo\"}");
+
+        // animation.set_duration moves the boundary key in one reversible entry.
+        harness.invoke(
+            "animation.set_duration moves the boundary",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":2.0}}");
+        const DispatchObservation moved = harness.invoke(
+            "timeline.set_loop_sync read-back after a duration move",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_number_is(first_lane_member(moved, "boundary_time"), 2.0),
+            "timeline.set_loop_sync duration move",
+            "a duration change did not move the managed boundary key");
+        harness.invoke("undo the duration move", "{\"op\":\"undo\"}");
+        const DispatchObservation restored = harness.invoke(
+            "timeline.set_loop_sync read-back after undo",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_number_is(first_lane_member(restored, "boundary_time"), 1.5),
+            "timeline.set_loop_sync undo",
+            "one undo did not restore the boundary key's time");
+
+        // A shrink below the one-millisecond spacing floor is rejected with the
+        // project unchanged: the sync cancels the enclosing transaction.
+        // The duration primitive accepts 1.0005 -- its boundary-excluding floor
+        // is 1.0 -- and the sync's one-millisecond spacing check then rejects,
+        // cancelling the enclosing transaction. The session surfaces that as a
+        // commit-time validation failure.
+        harness.invoke(
+            "animation.set_duration rejected onto the spacing floor",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":1.0005}}",
+            false,
+            "validation_failed");
+
+        // The runtime-only aim lane adopts its existing key at 0.5. The smoke's
+        // earlier duration cases leave `aim` at 0.75, so the precondition is
+        // asserted rather than assumed and then restored to the fixture's own
+        // boundary, which is exactly where the adoptable key sits.
+        const DispatchObservation aim_before_adoption = harness.invoke(
+            "timeline.describe aim before adoption",
+            "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"aim\"}}");
+        harness.expect(
+            number_member(aim_before_adoption.scene_delta(), "explicit_duration") ==
+                std::optional<double>(0.75),
+            "timeline.set_loop_sync adoption precondition",
+            "the adoption case expects aim at the smoke's 0.75 duration");
+        harness.invoke(
+            "animation.set_duration aim back onto its last key",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"aim\","
+            "\"duration\":0.5}}");
+        const DispatchObservation adopted = harness.invoke(
+            "timeline.set_loop_sync adopts a runtime-only lane",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kAimLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_string_is(
+                first_lane_member(adopted, "boundary_action"), "adopted"),
+            "timeline.set_loop_sync adoption action",
+            "an existing key at the boundary must be adopted, not created");
+        harness.expect(
+            number_member(adopted.scene_delta(), "created_key_count") ==
+                std::optional<double>(0.0),
+            "timeline.set_loop_sync adoption creates nothing",
+            "adoption must create no key");
+        harness.invoke(
+            "timeline.set_loop_sync materializes the aim lane",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kAimLane + "],\"enabled\":true}}");
+        harness.invoke("undo the aim materialization", "{\"op\":\"undo\"}");
+        harness.invoke("undo the aim duration", "{\"op\":\"undo\"}");
+
+        // Rejections, each leaving the project untouched.
+        struct LoopSyncRejection {
+            const char* label;
+            std::string request;
+        };
+        const std::vector<LoopSyncRejection> loop_rejections{
+            {"missing enabled",
+             std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                 kSpineLane + "]}}"},
+            {"a non-boolean enabled",
+             std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                 kSpineLane + "],\"enabled\":\"yes\"}}"},
+            {"a deform lane with no attachment",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"deform\",\"animation\":\"idle\",\"slot\":\"body\"}],"
+             "\"enabled\":true}}"},
+            {"a draw_order lane",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"draw_order\",\"animation\":\"idle\"}],\"enabled\":true}}"},
+            {"an event lane",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"event\",\"animation\":\"idle\"}],\"enabled\":true}}"},
+            {"a slot_attachment lane",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"slot_attachment\",\"animation\":\"idle\","
+             "\"slot\":\"body\"}],\"enabled\":true}}"},
+            {"an unknown kind",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"physics\",\"animation\":\"idle\"}],\"enabled\":true}}"},
+            {"an unknown transform channel",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+             "\"channel\":\"spinx\"}],\"enabled\":true}}"},
+            {"a duplicate lane",
+             std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                 kSpineLane + "," + kSpineLane + "],\"enabled\":true}}"},
+            {"an empty lanes array",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[],"
+             "\"enabled\":true}}"},
+            {"a lane with no key at time zero",
+             "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+             "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"arm_l\","
+             "\"channel\":\"rotate\"}],\"enabled\":true}}"},
+        };
+        for (const LoopSyncRejection& rejection : loop_rejections) {
+            harness.invoke(
+                std::string("timeline.set_loop_sync rejects ") + rejection.label,
+                rejection.request,
+                false,
+                "invalid_request");
+        }
+        harness.invoke(
+            "timeline.set_loop_sync rejects an unresolvable lane",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"no_such_bone\","
+            "\"channel\":\"rotate\"}],\"enabled\":true}}",
+            false,
+            "not_found");
+
+        const DispatchObservation after_loop_rejections = harness.invoke(
+            "timeline.set_loop_sync unchanged after rejections",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            lane_number_is(
+                first_lane_member(after_loop_rejections, "boundary_time"), 1.5) &&
+                first_lane_member(after_loop_rejections, "previous_enabled") != nullptr &&
+                first_lane_member(after_loop_rejections, "previous_enabled")
+                    ->as_boolean(),
+            "timeline.set_loop_sync rejection atomicity",
+            "a rejected loop-sync request mutated the project");
+
+        // Disabling succeeds even from a state the enable path would reject,
+        // which is what makes the atomic rejection humane.
+        harness.invoke(
+            "timeline.set_loop_sync disables a lane in a rejected state",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"arm_l\","
+            "\"channel\":\"rotate\"}],\"enabled\":false}}",
+            false,
+            "no_change");
+        harness.invoke(
+            "timeline.set_loop_sync disable",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":false}}");
+        const DispatchObservation released = harness.invoke(
+            "timeline.set_loop_sync read-back after disable",
+            std::string("{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[") +
+                kSpineLane + "],\"enabled\":true,\"dry_run\":true}}");
+        harness.expect(
+            first_lane_member(released, "previous_enabled") != nullptr &&
+                !first_lane_member(released, "previous_enabled")->as_boolean() &&
+                lane_number_is(first_lane_member(released, "boundary_time"), 1.5),
+            "timeline.set_loop_sync disable",
+            "disabling must clear the flag and leave the boundary key in place");
+
+        harness.invoke("undo the loop-sync disable", "{\"op\":\"undo\"}");
+        harness.invoke("undo the loop-sync enable", "{\"op\":\"undo\"}");
+        harness.invoke("undo the loop-boundary duration", "{\"op\":\"undo\"}");
+    }
+
+    // --- MAR-173: timeline.scale_key_times, the 60th operation. ---
+    {
+        const char* kSpine0 =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.0}";
+        const char* kSpineHalf =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.5}";
+        const char* kSpineOne =
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":1.0}";
+        const auto whole_lane = [&](std::string tail) {
+            return std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                kSpine0 + "," + kSpineHalf + "," + kSpineOne + "]," + tail + "}}";
+        };
+        const auto key_entry = [&](const DispatchObservation& observation,
+                                   std::size_t index) -> const json::Value* {
+            const json::Value* entries = member(observation.scene_delta(), "keys");
+            if (entries == nullptr || !entries->is_array() ||
+                entries->as_array().size() <= index) {
+                return nullptr;
+            }
+            return &entries->as_array()[index];
+        };
+        const auto key_number_is = [](const json::Value* value, double expected) {
+            return value != nullptr && value->is_number() &&
+                std::abs(value->as_number() - expected) <= 1e-6;
+        };
+        const auto key_bool_is = [](const json::Value* value, bool expected) {
+            return value != nullptr && value->is_boolean() &&
+                value->as_boolean() == expected;
+        };
+
+        // The dry run doubles as the precondition assertion: it reports each
+        // key's `previous_time`, so the lane's shape is checked, not assumed.
+        const DispatchObservation scale_dry_run = harness.invoke(
+            "timeline.scale_key_times dry run",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"dry_run\":true"));
+        harness.expect(
+            bool_member(scale_dry_run.scene_delta(), "dry_run") ==
+                    std::optional<bool>(true) &&
+                number_member(scale_dry_run.scene_delta(), "requested_scale") ==
+                    std::optional<double>(1.25) &&
+                number_member(scale_dry_run.scene_delta(), "applied_scale") ==
+                    std::optional<double>(1.25) &&
+                number_member(scale_dry_run.scene_delta(), "pivot_time") ==
+                    std::optional<double>(0.0) &&
+                number_member(scale_dry_run.scene_delta(), "original_span") ==
+                    std::optional<double>(1.0) &&
+                number_member(scale_dry_run.scene_delta(), "scaled_span") ==
+                    std::optional<double>(1.25) &&
+                number_member(scale_dry_run.scene_delta(), "key_count") ==
+                    std::optional<double>(3.0) &&
+                number_member(scale_dry_run.scene_delta(), "moved_key_count") ==
+                    std::optional<double>(2.0) &&
+                bool_member(scale_dry_run.scene_delta(), "keys_truncated") ==
+                    std::optional<bool>(false) &&
+                bool_member(scale_dry_run.scene_delta(), "snap") ==
+                    std::optional<bool>(false),
+            "timeline.scale_key_times dry run",
+            "the dry run did not report the ratio, the pivot, and both spans");
+        harness.expect(
+            key_number_is(member(key_entry(scale_dry_run, 0U), "previous_time"), 0.0) &&
+                key_number_is(member(key_entry(scale_dry_run, 0U), "time"), 0.0) &&
+                key_bool_is(member(key_entry(scale_dry_run, 0U), "moved"), false) &&
+                key_number_is(
+                    member(key_entry(scale_dry_run, 1U), "previous_time"), 0.5) &&
+                key_number_is(member(key_entry(scale_dry_run, 1U), "time"), 0.625) &&
+                key_bool_is(member(key_entry(scale_dry_run, 1U), "moved"), true) &&
+                key_number_is(
+                    member(key_entry(scale_dry_run, 2U), "previous_time"), 1.0) &&
+                key_number_is(member(key_entry(scale_dry_run, 2U), "time"), 1.25),
+            "timeline.scale_key_times dry-run key report",
+            "the per-key report did not carry previous_time, time, and moved");
+
+        // The same selection with the other pivot is a different edit.
+        const DispatchObservation end_pivot = harness.invoke(
+            "timeline.scale_key_times dry run with the end pivot",
+            whole_lane("\"scale\":0.5,\"pivot\":\"end\",\"dry_run\":true"));
+        harness.expect(
+            number_member(end_pivot.scene_delta(), "pivot_time") ==
+                    std::optional<double>(1.0) &&
+                key_number_is(member(key_entry(end_pivot, 0U), "time"), 0.5) &&
+                key_number_is(member(key_entry(end_pivot, 2U), "time"), 1.0),
+            "timeline.scale_key_times both pivots",
+            "the two pivots must produce different results for the same selection");
+
+        // `export.preview` reports the resolved export TARGET PATHS, not the
+        // exported content, so a time-only edit correctly leaves its payload
+        // identical. The design's §12.6 expected the payload to differ; that is
+        // wrong about this operation, and asserting the difference would have
+        // passed only on the response envelope's revision metadata. The
+        // content-level proof lives in marrow_project_smoke's MAR-173 export
+        // block, which exports the mutated project and asserts the loaded key
+        // time. What is asserted here is what this operation actually promises:
+        // a scaled project stays exportable to the same targets.
+        const auto preview_targets = [&](const DispatchObservation& observation) {
+            std::string joined;
+            const json::Value* targets = member(observation.scene_delta(), "targets");
+            if (targets == nullptr || !targets->is_array()) return joined;
+            for (const json::Value& entry : targets->as_array()) {
+                if (entry.is_string()) joined += entry.as_string() + "|";
+            }
+            return joined;
+        };
+        const DispatchObservation preview_before = harness.invoke(
+            "export.preview before the scale", "{\"op\":\"export.preview\"}");
+
+        const DispatchObservation scale_live = harness.invoke(
+            "timeline.scale_key_times live",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\""));
+        harness.expect(
+            bool_member(scale_live.scene_delta(), "dry_run") ==
+                    std::optional<bool>(false) &&
+                number_member(scale_live.scene_delta(), "moved_key_count") ==
+                    std::optional<double>(2.0) &&
+                number_member(scale_live.scene_delta(), "applied_scale") ==
+                    std::optional<double>(1.25),
+            "timeline.scale_key_times live",
+            "a live scale did not report its applied ratio and moved count");
+
+        const DispatchObservation preview_after = harness.invoke(
+            "export.preview after the scale", "{\"op\":\"export.preview\"}");
+        harness.expect(
+            preview_before.parsed && preview_after.parsed &&
+                !preview_targets(preview_before).empty() &&
+                preview_targets(preview_before) == preview_targets(preview_after),
+            "timeline.scale_key_times export preview",
+            "a scaled project must still preview the same export targets");
+
+        // A second identical live call moves nothing.
+        harness.invoke(
+            "timeline.scale_key_times no_change",
+            std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":0.0},"
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":0.625},"
+                "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                "\"channel\":\"rotate\",\"time\":1.25}],\"scale\":1.0,"
+                "\"pivot\":\"start\"}}",
+            false,
+            "no_change");
+
+        harness.invoke("undo the live scale", "{\"op\":\"undo\"}");
+        const DispatchObservation preview_undone = harness.invoke(
+            "export.preview after the undo", "{\"op\":\"export.preview\"}");
+        harness.expect(
+            preview_targets(preview_undone) == preview_targets(preview_before),
+            "timeline.scale_key_times export preview undo",
+            "undoing a scale must leave the export targets where they were");
+        const DispatchObservation restored = harness.invoke(
+            "timeline.scale_key_times read-back after undo",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"dry_run\":true"));
+        harness.expect(
+            key_number_is(member(key_entry(restored, 1U), "previous_time"), 0.5) &&
+                key_number_is(member(key_entry(restored, 2U), "previous_time"), 1.0),
+            "timeline.scale_key_times undo",
+            "one undo did not restore every key time");
+
+        // `previous_time` must be a PROJECT read, not an echo of the request.
+        // A selector's `time` only has to identify a key within the resolver's
+        // one-microsecond window, so this asks for 0.5000009 and 0.9999993 and
+        // requires the report to come back as the stored 0.5 and 1.0. An echo
+        // would return the offsets verbatim and pass every equality above,
+        // which is what made the read-back assertion tautological before.
+        const DispatchObservation offset_selectors = harness.invoke(
+            "timeline.scale_key_times reports resolved times, not the request",
+            "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.0},"
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.5000009},"
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\",\"time\":0.9999993}],\"scale\":1.25,"
+            "\"pivot\":\"start\",\"dry_run\":true}}");
+        const json::Value* offset_previous =
+            member(key_entry(offset_selectors, 1U), "previous_time");
+        const json::Value* offset_last =
+            member(key_entry(offset_selectors, 2U), "previous_time");
+        harness.expect(
+            offset_previous != nullptr && offset_previous->is_number() &&
+                offset_previous->as_number() == 0.5 && offset_last != nullptr &&
+                offset_last->is_number() && offset_last->as_number() == 1.0 &&
+                key_number_is(member(key_entry(offset_selectors, 1U), "time"), 0.625) &&
+                number_member(offset_selectors.scene_delta(), "original_span") ==
+                    std::optional<double>(1.0),
+            "timeline.scale_key_times resolved-time reporting",
+            "previous_time echoed the requested time instead of reading the project");
+
+        // Snapping reshapes the ratio, and only on request.
+        const DispatchObservation snapped = harness.invoke(
+            "timeline.scale_key_times snapped dry run",
+            whole_lane("\"scale\":1.234,\"pivot\":\"start\",\"snap\":true,"
+                       "\"frames_per_second\":60,\"dry_run\":true"));
+        const std::optional<double> applied =
+            number_member(snapped.scene_delta(), "applied_scale");
+        harness.expect(
+            applied.has_value() && std::abs(*applied - 1.234) > 1e-9 &&
+                std::abs(*applied * 60.0 - std::round(*applied * 60.0)) < 1e-6 &&
+                bool_member(snapped.scene_delta(), "snap") == std::optional<bool>(true),
+            "timeline.scale_key_times snapping",
+            "snap:true must reshape the ratio so the moved edge lands on a frame");
+
+        // A loop-pinned key rejects, naming the remedy.
+        harness.invoke(
+            "animation.set_duration for the scale pin case",
+            "{\"op\":\"animation.set_duration\",\"args\":{\"animation\":\"idle\","
+            "\"duration\":1.5}}");
+        harness.invoke(
+            "timeline.set_loop_sync for the scale pin case",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":["
+            "{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"channel\":\"rotate\"}],\"enabled\":true}}");
+        harness.invoke(
+            "timeline.scale_key_times rejects a loop-pinned key",
+            whole_lane("\"scale\":1.2,\"pivot\":\"end\""),
+            false,
+            "invalid_request");
+        // Both halves of the rejection: the call failed AND the authored key
+        // beside the pinned one survived.
+        harness.invoke(
+            "the spine key at 0.5 survived the rejected scale",
+            std::string("{\"op\":\"timeline.set_interpolation\",\"args\":{\"keys\":[") +
+                kSpineHalf + "],\"interpolation\":\"linear\",\"dry_run\":true}}");
+        harness.invoke("undo the scale pin enable", "{\"op\":\"undo\"}");
+        harness.invoke("undo the scale pin duration", "{\"op\":\"undo\"}");
+
+        // Rejections, each leaving the project untouched.
+        struct ScaleRejection {
+            const char* label;
+            std::string request;
+            const char* code;
+        };
+        const std::vector<ScaleRejection> scale_rejections{
+            {"a missing scale", whole_lane("\"pivot\":\"start\""), "invalid_request"},
+            {"a non-numeric scale",
+             whole_lane("\"scale\":\"1.5\",\"pivot\":\"start\""), "invalid_request"},
+            {"a zero scale", whole_lane("\"scale\":0,\"pivot\":\"start\""),
+             "invalid_request"},
+            {"a negative scale", whole_lane("\"scale\":-1,\"pivot\":\"start\""),
+             "invalid_request"},
+            {"a missing pivot", whole_lane("\"scale\":1.25"), "invalid_request"},
+            {"an unknown pivot", whole_lane("\"scale\":1.25,\"pivot\":\"middle\""),
+             "invalid_request"},
+            {"an empty keys array",
+             "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[],"
+             "\"scale\":1.25,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a duplicate key",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 + "," + kSpineHalf + "," + kSpineHalf +
+                 "],\"scale\":1.25,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a single-key selection",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpineHalf + "],\"scale\":1.25,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"keys from two animations",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 +
+                 ",{\"kind\":\"transform\",\"animation\":\"aim\",\"bone\":\"arm_l\","
+                 "\"channel\":\"rotate\",\"time\":0.0}],\"scale\":1.25,"
+                 "\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a non-event collision",
+             whole_lane("\"scale\":0.001,\"pivot\":\"start\""), "invalid_request"},
+            {"an intrusion into an unselected neighbour",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 + "," + kSpineHalf +
+                 "],\"scale\":1.999,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"a partial event tie",
+             "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":["
+             "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.25,\"ordinal\":0},"
+             "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.8}],"
+             "\"scale\":1.5,\"pivot\":\"start\"}}",
+             "invalid_request"},
+            {"snap with a non-positive frames_per_second",
+             whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"snap\":true,"
+                        "\"frames_per_second\":0"),
+             "invalid_request"},
+            {"an unresolvable key",
+             std::string("{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":[") +
+                 kSpine0 +
+                 ",{\"kind\":\"transform\",\"animation\":\"idle\",\"bone\":\"spine\","
+                 "\"channel\":\"rotate\",\"time\":0.42}],\"scale\":1.25,"
+                 "\"pivot\":\"start\"}}",
+             "not_found"},
+        };
+        for (const ScaleRejection& rejection : scale_rejections) {
+            harness.invoke(
+                std::string("timeline.scale_key_times rejects ") + rejection.label,
+                rejection.request,
+                false,
+                rejection.code);
+        }
+        const DispatchObservation after_scale_rejections = harness.invoke(
+            "timeline.scale_key_times unchanged after rejections",
+            whole_lane("\"scale\":1.25,\"pivot\":\"start\",\"dry_run\":true"));
+        harness.expect(
+            key_number_is(
+                member(key_entry(after_scale_rejections, 1U), "previous_time"), 0.5) &&
+                key_number_is(
+                    member(key_entry(after_scale_rejections, 2U), "previous_time"), 1.0),
+            "timeline.scale_key_times rejection atomicity",
+            "a rejected scale request mutated the project");
+
+        // Event ties move together, and the whole tie is a legal selection.
+        harness.invoke(
+            "timeline.scale_key_times carries a complete event tie",
+            "{\"op\":\"timeline.scale_key_times\",\"args\":{\"keys\":["
+            "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.25,\"ordinal\":0},"
+            "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.25,\"ordinal\":1},"
+            "{\"kind\":\"event\",\"animation\":\"idle\",\"time\":0.8}],"
+            "\"scale\":1.5,\"pivot\":\"start\",\"dry_run\":true}}");
+    }
+
+
     // Two merge-enabled transform edits must form one undo group. Temporary
     // JSON/binary comparison gives an implementation-independent key count.
     harness.invoke(
@@ -1480,16 +3183,95 @@ int main(int argc, char** argv) {
         "edit_ik_constraint after failed commit",
         "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
         "\"dry_run\":true}}");
+    // MAR-179: the rollback read-back now echoes the whole merged edit, the way
+    // the other three families always have. The old three-key payload was the
+    // visible half of the gap -- the handler short-circuited before merging, so
+    // it could only report what it had parsed.
     expect_exact_scene_delta(
         harness,
         "edit_ik_constraint failed commit rollback",
         ik_after_failed_commit,
-        R"json({"dry_run":true,"name":"editor_arm_reach","mix":0.75})json");
+        R"json({
+          "dry_run":true,"name":"editor_arm_reach",
+          "bones":["ik_upper","ik_lower"],"target":"ik_target","mix":0.75,
+          "bend_positive":true,"softness":0,"compress":false,"stretch":false
+        })json");
 
     harness.invoke(
         "edit_ik_constraint",
         "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
         "\"mix\":0.5}}");
+
+    // MAR-179: the three runtime-backed IK fields the handler never read. The
+    // dry run and the live delta must be identical apart from "dry_run" --
+    // AGENTS.md records that invariant for the other three constraint families,
+    // and edit_ik_constraint was the one that did not hold it (it returned no
+    // scene_delta at all on the live path).
+    const DispatchObservation ik_parameters_dry_run = harness.invoke(
+        "edit_ik_constraint softness/compress/stretch dry-run",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"softness\":12.5,\"compress\":true,\"stretch\":true,\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_ik_constraint softness/compress/stretch dry-run",
+        ik_parameters_dry_run,
+        R"json({
+          "dry_run":true,"name":"editor_arm_reach",
+          "bones":["ik_upper","ik_lower"],"target":"ik_target","mix":0.5,
+          "bend_positive":true,"softness":12.5,"compress":true,"stretch":true
+        })json");
+
+    // The surface guard of design 5.3. The format itself accepts a negative
+    // softness at all three layers and the runtime reads it as zero, so this
+    // rejection lives here and NOT in project.cpp -- tightening the loader
+    // would make an existing `.marrow` unopenable.
+    const DispatchObservation ik_negative_softness = harness.invoke(
+        "edit_ik_constraint negative softness",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"softness\":-1}}",
+        false,
+        "invalid_request");
+    harness.expect(
+        string_member(&ik_negative_softness.root, "message") ==
+            std::optional<std::string_view>(
+                "ik constraint softness must be non-negative."),
+        "edit_ik_constraint negative softness",
+        "the surface guard message changed");
+    const DispatchObservation ik_softness_unchanged = harness.invoke(
+        "edit_ik_constraint after negative softness",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"dry_run\":true}}");
+    expect_exact_scene_delta(
+        harness,
+        "edit_ik_constraint after negative softness",
+        ik_softness_unchanged,
+        R"json({
+          "dry_run":true,"name":"editor_arm_reach",
+          "bones":["ik_upper","ik_lower"],"target":"ik_target","mix":0.5,
+          "bend_positive":true,"softness":0,"compress":false,"stretch":false
+        })json");
+
+    const DispatchObservation ik_parameters_live = harness.invoke(
+        "edit_ik_constraint softness/compress/stretch live",
+        "{\"op\":\"edit_ik_constraint\",\"args\":{\"name\":\"editor_arm_reach\","
+        "\"softness\":12.5,\"compress\":true,\"stretch\":true}}");
+    {
+        std::string dry_run_as_live = compact_scene_delta(ik_parameters_dry_run);
+        constexpr std::string_view kDryRunTrue = "\"dry_run\":true";
+        constexpr std::string_view kDryRunFalse = "\"dry_run\":false";
+        const auto flag_position = dry_run_as_live.find(kDryRunTrue);
+        if (flag_position != std::string::npos) {
+            dry_run_as_live.replace(
+                flag_position, kDryRunTrue.size(), kDryRunFalse);
+        }
+        harness.expect(
+            flag_position != std::string::npos &&
+                compact_scene_delta(ik_parameters_live) == dry_run_as_live,
+            "edit_ik_constraint dry-run and live payload parity",
+            "the live scene_delta differs from the dry run by more than "
+            "\"dry_run\": " +
+                compact_scene_delta(ik_parameters_live));
+    }
 
     const DispatchObservation path_constraint_live = harness.invoke(
         "edit_path_constraint",
@@ -1667,6 +3449,661 @@ int main(int argc, char** argv) {
             normalize_weights_idempotent.scene_delta()->is_null(),
         "normalize_weights idempotent",
         "idempotent normalize success contract changed");
+
+    // ── MAR-175: the canonical rules, asserted on the AGENT surface ────────
+    //
+    // Every rule below is also covered by the shell smoke and the unit tests.
+    // It is asserted here too because a rule enforced only in the GUI is a rule
+    // a script can walk straight past.
+    const auto weight_rows = [&](std::string_view label) -> const json::Value* {
+        static DispatchObservation described;
+        described = harness.invoke(
+            label,
+            "{\"op\":\"mesh.describe\",\"args\":{\"skin\":\"mesh_base\","
+            "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+        return member(described.scene_delta(), "weights");
+    };
+    const auto influence_count =
+        [&](const json::Value* rows, std::size_t vertex) -> std::optional<std::size_t> {
+        if (rows == nullptr || !rows->is_array() || vertex >= rows->as_array().size() ||
+            !rows->as_array()[vertex].is_array()) {
+            return std::nullopt;
+        }
+        return rows->as_array()[vertex].as_array().size();
+    };
+    const auto influence_of =
+        [&](const json::Value* rows, std::size_t vertex, std::size_t slot) -> const json::Value* {
+        if (rows == nullptr || !rows->is_array() || vertex >= rows->as_array().size() ||
+            !rows->as_array()[vertex].is_array() ||
+            slot >= rows->as_array()[vertex].as_array().size()) {
+            return nullptr;
+        }
+        return &rows->as_array()[vertex].as_array()[slot];
+    };
+    const auto serialize_rows = [&](const json::Value* rows, std::size_t vertex) -> std::string {
+        if (rows == nullptr || !rows->is_array() || vertex >= rows->as_array().size()) {
+            return "<missing>";
+        }
+        return json::serialize_pretty_round_trip(rows->as_array()[vertex]);
+    };
+
+    // A duplicate bone used to commit `ok: true` and then make the project
+    // unsavable -- validate_project_for_save refuses a repeated bone. It now
+    // merges, and the merged weight is the sum.
+    harness.invoke(
+        "set_vertex_weights duplicate bone merges",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":2,\"influences\":[{\"bone\":\"spine\",\"x\":10,\"y\":0,"
+        "\"weight\":0.5},{\"bone\":\"spine\",\"x\":30,\"y\":0,\"weight\":0.5}]}]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after duplicate merge");
+        harness.expect(
+            influence_count(rows, 2U) == std::optional<std::size_t>(1U),
+            "set_vertex_weights duplicate bone merges",
+            "a repeated bone must merge into one influence");
+        harness.expect(
+            number_member(influence_of(rows, 2U, 0U), "weight") == std::optional<double>(1.0) &&
+                number_member(influence_of(rows, 2U, 0U), "x") == std::optional<double>(20.0),
+            "set_vertex_weights duplicate bone merges",
+            "the merged influence must carry the summed weight and the weight-weighted mean bind");
+    }
+
+    // A zero weight used to survive to save and be refused there.
+    const std::string vertex3_before_zero_drop =
+        serialize_rows(weight_rows("mesh.describe before zero drop"), 3U);
+    harness.invoke(
+        "set_vertex_weights drops a zero influence",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":1,\"influences\":[{\"bone\":\"spine\",\"x\":60,\"y\":0,"
+        "\"weight\":0.8},{\"bone\":\"arm_l\",\"x\":20,\"y\":0,\"weight\":0}]}]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after zero drop");
+        harness.expect(
+            influence_count(rows, 1U) == std::optional<std::size_t>(1U) &&
+                number_member(influence_of(rows, 1U, 0U), "weight") ==
+                    std::optional<double>(1.0),
+            "set_vertex_weights drops a zero influence",
+            "a zero-weight influence must be dropped and the survivor normalized");
+        // Survival: the vertex this call did not name is byte-identical.
+        harness.expect(
+            serialize_rows(rows, 3U) == vertex3_before_zero_drop,
+            "set_vertex_weights drops a zero influence",
+            "an unnamed vertex must be byte-identical after a scoped weight write");
+    }
+
+    // D6 -- non-finite weights. `NaN <= 1e-6` is false, so a NaN survived both
+    // guards of the two normalizers this story deletes and then poisoned every
+    // influence on the vertex. On the AGENT surface that defect was never
+    // actually reachable: JSON has no NaN or Infinity literal, and the parser
+    // refuses a numeric literal that overflows to infinity ("invalid numeric
+    // value"), so the payload dies before the operation runs. Asserted here so
+    // nobody later "fixes" the guard away on the grounds that no agent test
+    // exercises it; the reachable paths -- the brush and any in-process caller
+    // of the primitive -- are covered by marrow_mesh_weight_model_tests and
+    // marrow_project_smoke.
+    harness.expect(
+        harness.dispatch_rejects(
+            "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+            "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+            "{\"index\":1,\"influences\":[{\"bone\":\"spine\",\"x\":60,\"y\":0,"
+            "\"weight\":1e400}]}]}}"),
+        "set_vertex_weights rejects a non-finite weight",
+        "an overflowing weight literal must never reach the project");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after non-finite rejection");
+        harness.expect(
+            influence_count(rows, 1U) == std::optional<std::size_t>(1U) &&
+                number_member(influence_of(rows, 1U, 0U), "weight") ==
+                    std::optional<double>(1.0),
+            "set_vertex_weights rejects a non-finite weight",
+            "a rejected weight write must leave the vertex untouched");
+    }
+
+    // MAR-175 C1: canonicalization is unconditional, so an explicit
+    // "normalize": false has no implementable meaning and rejects loudly.
+    harness.invoke(
+        "set_vertex_weights rejects normalize:false",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"normalize\":false,"
+        "\"vertices\":[{\"index\":1,\"influences\":[{\"bone\":\"spine\","
+        "\"x\":60,\"y\":0,\"weight\":0.5}]}]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "set_vertex_weights still accepts normalize:true",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"normalize\":true,"
+        "\"vertices\":[{\"index\":1,\"influences\":[{\"bone\":\"spine\","
+        "\"x\":60,\"y\":0,\"weight\":0.4},{\"bone\":\"arm_l\",\"x\":20,"
+        "\"y\":0,\"weight\":0.4}]}]}}");
+    harness.invoke(
+        "set_vertex_weights rejects five influences",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":1,\"influences\":[{\"bone\":\"root\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"spine\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"arm_l\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"ik_upper\",\"x\":0,\"y\":0,\"weight\":0.2},"
+        "{\"bone\":\"ik_lower\",\"x\":0,\"y\":0,\"weight\":0.2}]}]}}",
+        false);
+
+    // MAR-175: normalize_weights gains an optional vertex scope. Absent means
+    // every vertex, which is the shipped behaviour.
+    const std::string vertex0_before_scope =
+        serialize_rows(weight_rows("mesh.describe before scoped normalize"), 0U);
+    const std::string vertex3_before_scope =
+        serialize_rows(weight_rows("mesh.describe before scoped normalize 3"), 3U);
+    const DispatchObservation scoped_dry_run = harness.invoke(
+        "normalize_weights scoped dry-run",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1],"
+        "\"dry_run\":true}}");
+    harness.expect(
+        number_member(scoped_dry_run.scene_delta(), "vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(scoped_dry_run.scene_delta(), "scoped_vertex_count") ==
+                std::optional<double>(1.0),
+        "normalize_weights scoped dry-run",
+        "a scoped normalize must report the attachment size and the vertices it addressed");
+    const DispatchObservation scoped_normalize = harness.invoke(
+        "normalize_weights scoped to one vertex",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1]}}");
+    harness.expect(
+        string_member(&scoped_normalize.root, "message") ==
+            std::optional<std::string_view>("Mesh weights already normalized."),
+        "normalize_weights scoped to one vertex",
+        "normalizing an already-canonical vertex must keep the shipped no_change message");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after scoped normalize");
+        harness.expect(
+            serialize_rows(rows, 0U) == vertex0_before_scope &&
+                serialize_rows(rows, 3U) == vertex3_before_scope,
+            "normalize_weights scoped to one vertex",
+            "vertices outside the scope must be byte-identical");
+    }
+    harness.invoke(
+        "normalize_weights rejects an empty scope",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[]}}",
+        false);
+    harness.invoke(
+        "normalize_weights rejects an out-of-range vertex",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[99]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "normalize_weights rejects a repeated vertex",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1,1]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "normalize_weights rejects a fractional vertex index",
+        "{\"op\":\"normalize_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[1.5]}}",
+        false);
+
+    // ── MAR-175: mesh.rebind_weights ──────────────────────────────────────
+    const DispatchObservation rebind_dry_run = harness.invoke(
+        "mesh.rebind_weights dry-run",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"dry_run\":true}}");
+    harness.expect(
+        bool_member(rebind_dry_run.scene_delta(), "dry_run") == std::optional<bool>(true) &&
+            number_member(rebind_dry_run.scene_delta(), "vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(rebind_dry_run.scene_delta(), "scoped_vertex_count") ==
+                std::optional<double>(4.0),
+        "mesh.rebind_weights dry-run",
+        "the dry run must report the attachment and scope sizes");
+    const std::string vertex0_before_rebind =
+        serialize_rows(weight_rows("mesh.describe before rebind"), 0U);
+    harness.invoke(
+        "mesh.rebind_weights live",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after rebind");
+        // Rebind changes bind offsets only: every weight must be untouched.
+        bool weights_held = true;
+        for (std::size_t vertex = 0; vertex < 4U; ++vertex) {
+            const auto count = influence_count(rows, vertex);
+            if (!count.has_value()) {
+                weights_held = false;
+                break;
+            }
+            for (std::size_t slot = 0; slot < *count; ++slot) {
+                if (!number_member(influence_of(rows, vertex, slot), "weight").has_value()) {
+                    weights_held = false;
+                }
+            }
+        }
+        harness.expect(
+            weights_held, "mesh.rebind_weights live", "rebind must keep every influence readable");
+    }
+    const DispatchObservation rebind_again = harness.invoke(
+        "mesh.rebind_weights idempotent",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}");
+    harness.expect(
+        string_member(&rebind_again.root, "message") ==
+            std::optional<std::string_view>("Mesh weights already bound to the setup pose."),
+        "mesh.rebind_weights idempotent",
+        "a rebind that moves nothing must report no_change with its documented message");
+    harness.invoke("undo mesh.rebind_weights", "{\"op\":\"undo\"}");
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after rebind undo"), 0U) ==
+            vertex0_before_rebind,
+        "undo mesh.rebind_weights",
+        "undo must restore the pre-rebind bind offsets bit-exactly");
+    harness.invoke(
+        "mesh.rebind_weights rejects a missing attachment",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"no_such_mesh\"}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "mesh.rebind_weights requires a target",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\"}}",
+        false);
+    harness.invoke(
+        "mesh.rebind_weights rejects an out-of-range vertex",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[99]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "mesh.rebind_weights rejects an empty scope",
+        "{\"op\":\"mesh.rebind_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":[]}}",
+        false);
+
+    // ── MAR-176: mesh.generate_weights ────────────────────────────────────
+    //
+    // Earlier cases in this smoke have rewritten these vertices, so restore the
+    // fixture's authored influences first. The exact 0.5/0.5 tie below is a
+    // property of WHERE the vertex sits -- past spine's segment end and behind
+    // arm_l's segment start, so both clamp to spine's world origin -- and
+    // asserting it against whatever the previous case happened to leave behind
+    // would be asserting nothing.
+    harness.invoke(
+        "restore fixture weights before generate",
+        "{\"op\":\"set_vertex_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"vertices\":["
+        "{\"index\":0,\"influences\":[{\"bone\":\"spine\",\"x\":-64,\"y\":-80,\"weight\":1}]},"
+        "{\"index\":2,\"influences\":[{\"bone\":\"spine\",\"x\":64,\"y\":80,\"weight\":0.2},"
+        "{\"bone\":\"arm_l\",\"x\":94,\"y\":70,\"weight\":0.6}]}]}}");
+    const std::string vertex0_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 0U);
+    const std::string vertex1_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 1U);
+    const std::string vertex2_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 2U);
+    const std::string vertex3_before_generate =
+        serialize_rows(weight_rows("mesh.describe before generate"), 3U);
+    const DispatchObservation generate_dry_run = harness.invoke(
+        "mesh.generate_weights dry-run",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"],"
+        "\"dry_run\":true}}");
+    harness.expect(
+        string_member(&generate_dry_run.root, "message") ==
+            std::optional<std::string_view>("Mesh weight generation validated."),
+        "mesh.generate_weights dry-run",
+        "a dry run must report the documented validation message");
+    harness.expect(
+        bool_member(generate_dry_run.scene_delta(), "dry_run") == std::optional<bool>(true) &&
+            number_member(generate_dry_run.scene_delta(), "vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(generate_dry_run.scene_delta(), "scoped_vertex_count") ==
+                std::optional<double>(4.0) &&
+            number_member(generate_dry_run.scene_delta(), "candidate_bone_count") ==
+                std::optional<double>(2.0),
+        "mesh.generate_weights dry-run",
+        "the dry run must report the attachment size, the scope size, and the candidate count");
+    // A dry run must leave the project exactly where it was.
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after generate dry run"), 2U) ==
+            vertex2_before_generate,
+        "mesh.generate_weights dry-run",
+        "a dry run must not touch the project");
+    const DispatchObservation generate_dry_run_again = harness.invoke(
+        "mesh.generate_weights dry-run repeated",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"],"
+        "\"dry_run\":true}}");
+    harness.expect(
+        json::serialize_pretty_round_trip(*generate_dry_run.scene_delta()) ==
+            json::serialize_pretty_round_trip(*generate_dry_run_again.scene_delta()),
+        "mesh.generate_weights dry-run repeated",
+        "two dry runs must report an identical payload, affected_vertices included");
+
+    // Scoped: vertices [0] only. Vertex 0 carries one influence in the fixture
+    // and must gain arm_l; the other three must be byte-identical afterwards.
+    harness.invoke(
+        "mesh.generate_weights scoped to vertex 0",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"],"
+        "\"vertices\":[0]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after scoped generate");
+        harness.expect(
+            influence_count(rows, 0U) == std::optional<std::size_t>(2U),
+            "mesh.generate_weights scoped to vertex 0",
+            "vertex 0 must gain a second influence");
+        harness.expect(
+            string_member(influence_of(rows, 0U, 0U), "bone") ==
+                    std::optional<std::string_view>("spine") &&
+                string_member(influence_of(rows, 0U, 1U), "bone") ==
+                    std::optional<std::string_view>("arm_l"),
+            "mesh.generate_weights scoped to vertex 0",
+            "vertex 0 must hold spine then arm_l in canonical order");
+        harness.expect(
+            serialize_rows(rows, 1U) == vertex1_before_generate &&
+                serialize_rows(rows, 2U) == vertex2_before_generate &&
+                serialize_rows(rows, 3U) == vertex3_before_generate,
+            "mesh.generate_weights scoped to vertex 0",
+            "vertices outside the scope must be byte-identical");
+    }
+    harness.invoke("undo scoped mesh.generate_weights", "{\"op\":\"undo\"}");
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after scoped generate undo"), 0U) ==
+            vertex0_before_generate,
+        "undo scoped mesh.generate_weights",
+        "undo must restore the pre-generate influences bit-exactly");
+
+    // Unscoped: every vertex. Vertex 2's two candidates are exactly equidistant
+    // -- both clamp to spine's world origin -- so the weights are exactly one
+    // half each and the tie breaks on ascending skeleton index.
+    harness.invoke(
+        "mesh.generate_weights live",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"]}}");
+    {
+        const json::Value* rows = weight_rows("mesh.describe after generate");
+        harness.expect(
+            number_member(influence_of(rows, 2U, 0U), "weight") ==
+                    std::optional<double>(0.5) &&
+                number_member(influence_of(rows, 2U, 1U), "weight") ==
+                    std::optional<double>(0.5),
+            "mesh.generate_weights live",
+            "vertex 2's equidistant candidates must weigh exactly 0.5 each");
+        harness.expect(
+            string_member(influence_of(rows, 2U, 0U), "bone") ==
+                    std::optional<std::string_view>("spine") &&
+                string_member(influence_of(rows, 2U, 1U), "bone") ==
+                    std::optional<std::string_view>("arm_l"),
+            "mesh.generate_weights live",
+            "an exact weight tie must order spine before arm_l on skeleton index");
+    }
+    const DispatchObservation generate_again = harness.invoke(
+        "mesh.generate_weights repeated",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\",\"arm_l\"]}}");
+    // Deliberately NOT asserted as `no_change`: generation is deterministic but
+    // not bit-exactly idempotent, because BoneWorldTransform is float32 while
+    // bind offsets are double. A repeat may legitimately report a change of a
+    // few ULPs. What is asserted is that it succeeds and keeps the exact tie.
+    harness.expect(
+        bool_member(&generate_again.root, "ok") == std::optional<bool>(true),
+        "mesh.generate_weights repeated",
+        "a repeated generate must succeed whether or not it reports a change");
+    harness.expect(
+        number_member(influence_of(weight_rows("mesh.describe after repeat"), 2U, 0U),
+                      "weight") == std::optional<double>(0.5),
+        "mesh.generate_weights repeated",
+        "the exact tie must survive a second generate");
+    // How many history entries the repeat created is exactly the open question
+    // of section 7.6: a repeated generate is deterministic but not bit-exactly
+    // idempotent, so it may legitimately commit a few-ULP change or may report
+    // no_change. Drive the undo count off what it actually reported rather than
+    // assuming either answer -- assuming one is how a test starts passing for
+    // the wrong reason.
+    const bool repeat_committed =
+        bool_member(generate_again.scene_delta(), "changed") == std::optional<bool>(true);
+    std::cout << "  MAR-176 note: a repeated mesh.generate_weights reported changed="
+              << (repeat_committed ? "true" : "false")
+              << " -- generation is deterministic but not bit-exactly idempotent, so either "
+                 "answer is correct and neither is asserted.\n";
+    if (repeat_committed) {
+        harness.invoke("undo mesh.generate_weights repeat", "{\"op\":\"undo\"}");
+    }
+    harness.invoke("undo mesh.generate_weights", "{\"op\":\"undo\"}");
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after generate undo"), 2U) ==
+            vertex2_before_generate,
+        "undo mesh.generate_weights",
+        "undo must restore the pre-generate influences bit-exactly");
+
+    // AC1 on the wire: `bones` is required and is never expanded.
+    harness.invoke(
+        "mesh.generate_weights requires bones",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\"}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects an empty bones array",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects an unknown bone",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"nope\"]}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "mesh.generate_weights rejects a repeated bone",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\","
+        "\"bones\":[\"spine\",\"spine\"]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects a non-string bone entry",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[7]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects an empty bone name",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"\"]}}",
+        false);
+    harness.invoke(
+        "mesh.generate_weights rejects a missing attachment",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"no_such_mesh\","
+        "\"bones\":[\"spine\"]}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "mesh.generate_weights rejects an out-of-range vertex",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\"],"
+        "\"vertices\":[99]}}",
+        false,
+        "invalid_request");
+    harness.invoke(
+        "mesh.generate_weights rejects an empty scope",
+        "{\"op\":\"mesh.generate_weights\",\"args\":{\"skin\":\"mesh_base\","
+        "\"slot\":\"body\",\"attachment\":\"body_mesh\",\"bones\":[\"spine\"],"
+        "\"vertices\":[]}}",
+        false);
+    harness.expect(
+        serialize_rows(weight_rows("mesh.describe after generate rejections"), 2U) ==
+            vertex2_before_generate,
+        "mesh.generate_weights rejections",
+        "no rejected generate may change the project");
+
+    // ── MAR-178: constraint.rename / constraint.delete ─────────────────────
+    //
+    // Read back the SURVIVORS by name from `constraints.list` rather than the
+    // return code: the worst lifecycle failure lands on load, not on save.
+    const auto constraint_names = [&](std::string_view label) {
+        const DispatchObservation listed =
+            harness.invoke(label, "{\"op\":\"constraints.list\"}");
+        return compact_scene_delta(listed);
+    };
+
+    const std::string constraints_before_dry_run =
+        constraint_names("constraints.list before constraint dry run");
+
+    const DispatchObservation rename_dry_run = harness.invoke(
+        "constraint.rename dry-run",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"transform\","
+        "\"from\":\"editor_transform_follow\",\"to\":\"transform_follow_v2\","
+        "\"dry_run\":true}}");
+    harness.expect(
+        bool_member(rename_dry_run.scene_delta(), "dry_run") ==
+                std::optional<bool>(true) &&
+            string_member(rename_dry_run.scene_delta(), "ownership") ==
+                std::optional<std::string_view>("project") &&
+            number_member(rename_dry_run.scene_delta(), "skin_reference_count") ==
+                std::optional<double>(0.0),
+        "constraint.rename dry-run",
+        "the dry run must report ownership and the pre-mutation skin summary");
+    harness.expect(
+        constraint_names("constraints.list after constraint dry run") ==
+            constraints_before_dry_run,
+        "constraint.rename dry-run",
+        "a dry run must leave constraints.list byte-identical");
+
+    const DispatchObservation rename_live = harness.invoke(
+        "constraint.rename live",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"transform\","
+        "\"from\":\"editor_transform_follow\",\"to\":\"transform_follow_v2\"}}");
+    {
+        // The dry-run payload must equal the live payload apart from `dry_run`,
+        // which is the cheapest proof that both ran the same primitive.
+        std::string dry = compact_scene_delta(rename_dry_run);
+        const std::string marker = "\"dry_run\":true,";
+        const auto position = dry.find(marker);
+        if (position != std::string::npos) {
+            dry.erase(position, marker.size());
+        }
+        harness.expect(
+            dry == compact_scene_delta(rename_live),
+            "constraint.rename live",
+            "the dry-run and live scene_delta must differ only by \"dry_run\": " +
+                compact_scene_delta(rename_live));
+    }
+    const std::string constraints_after_rename =
+        constraint_names("constraints.list after rename");
+    harness.expect(
+        constraints_after_rename.find("transform_follow_v2") != std::string::npos &&
+            constraints_after_rename.find("editor_transform_follow") ==
+                std::string::npos,
+        "constraint.rename live",
+        "the renamed constraint must read back under its new name only");
+
+    harness.invoke("undo constraint.rename", "{\"op\":\"undo\"}");
+    harness.expect(
+        constraint_names("constraints.list after rename undo") ==
+            constraints_before_dry_run,
+        "undo constraint.rename",
+        "undo must restore the exact pre-rename constraint list");
+
+    // --- Delete, asserted on the survivors. --------------------------------
+    harness.invoke(
+        "constraint.delete live",
+        "{\"op\":\"constraint.delete\",\"args\":{\"family\":\"physics\","
+        "\"name\":\"editor_ribbon_secondary\"}}");
+    {
+        const std::string survivors =
+            constraint_names("constraints.list after delete");
+        harness.expect(
+            survivors.find("editor_ribbon_secondary") == std::string::npos &&
+                survivors.find("editor_arm_reach") != std::string::npos &&
+                survivors.find("editor_guide_follow") != std::string::npos &&
+                survivors.find("editor_transform_follow") != std::string::npos,
+            "constraint.delete live",
+            "the delete must remove exactly its own target and leave the other "
+            "three families' constraints readable");
+    }
+    harness.invoke("undo constraint.delete", "{\"op\":\"undo\"}");
+    harness.expect(
+        constraint_names("constraints.list after delete undo") ==
+            constraints_before_dry_run,
+        "undo constraint.delete",
+        "undo must restore the deleted constraint");
+
+    // --- Dry-run and live must reject identically, message for message. -----
+    {
+        const DispatchObservation rejected_dry = harness.invoke(
+            "constraint.rename dry-run rejects an unchanged target",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"ik\","
+            "\"from\":\"editor_arm_reach\",\"to\":\"editor_arm_reach\","
+            "\"dry_run\":true}}",
+            false);
+        const DispatchObservation rejected_live = harness.invoke(
+            "constraint.rename live rejects an unchanged target",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"ik\","
+            "\"from\":\"editor_arm_reach\",\"to\":\"editor_arm_reach\"}}",
+            false);
+        const auto dry_message = string_member(&rejected_dry.root, "message");
+        const auto live_message = string_member(&rejected_live.root, "message");
+        harness.expect(
+            dry_message.has_value() && live_message.has_value() &&
+                *dry_message == *live_message,
+            "constraint.rename dry-run/live message parity",
+            "a hand-written dry-run check drifts from the primitive's message; "
+            "measured dry='" +
+                std::string(dry_message.value_or("")) + "' live='" +
+                std::string(live_message.value_or("")) + "'");
+    }
+
+    // --- Family validation. -------------------------------------------------
+    harness.invoke(
+        "constraint.rename rejects an unknown family",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"bone\","
+        "\"from\":\"editor_arm_reach\",\"to\":\"arm_v2\"}}",
+        false);
+    harness.invoke(
+        "constraint.rename requires a family",
+        "{\"op\":\"constraint.rename\",\"args\":{"
+        "\"from\":\"editor_arm_reach\",\"to\":\"arm_v2\"}}",
+        false);
+    harness.invoke(
+        "constraint.rename rejects a right name in the wrong family",
+        "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"ik\","
+        "\"from\":\"editor_ribbon_secondary\",\"to\":\"arm_v2\"}}",
+        false,
+        "not_found");
+    harness.invoke(
+        "constraint.delete requires a name",
+        "{\"op\":\"constraint.delete\",\"args\":{\"family\":\"physics\"}}",
+        false);
+    harness.invoke(
+        "constraint.delete rejects a missing constraint",
+        "{\"op\":\"constraint.delete\",\"args\":{\"family\":\"physics\","
+        "\"name\":\"never_existed\"}}",
+        false,
+        "not_found");
+
+    // --- A rejection leaves the history clean: the next undo must reverse the
+    //     PREVIOUS edit, not the rejected one.
+    {
+        harness.invoke(
+            "constraint.rename seeds a history entry",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"path\","
+            "\"from\":\"editor_guide_follow\",\"to\":\"guide_follow_v2\"}}");
+        harness.invoke(
+            "constraint.rename rejected after a real edit",
+            "{\"op\":\"constraint.rename\",\"args\":{\"family\":\"path\","
+            "\"from\":\"guide_follow_v2\",\"to\":\"guide_follow_v2\"}}",
+            false);
+        harness.invoke("undo after a rejected constraint.rename", "{\"op\":\"undo\"}");
+        harness.expect(
+            constraint_names("constraints.list after the rejected rename undo") ==
+                constraints_before_dry_run,
+            "undo after a rejected constraint.rename",
+            "a rejected edit must leave no history entry, so undo reverses the "
+            "previous one");
+    }
+
     harness.invoke(
         "set_slot_color_keyframe",
         "{\"op\":\"set_slot_color_keyframe\",\"args\":{\"animation\":\"idle\","
@@ -1693,6 +4130,262 @@ int main(int argc, char** argv) {
         "remove_draw_order_keyframe",
         "{\"op\":\"remove_draw_order_keyframe\",\"args\":{\"animation\":\"idle\","
         "\"time\":0.75}}");
+
+    // --- MAR-185 A2-A7: the two inherit operations ------------------------
+    //
+    // Against `player_idle`, whose sixteen bones ALL have an absent setup
+    // `inherit` (i.e. `Normal`) and whose animations carry zero inherit
+    // timelines. No case here writes a lone `{0.0, "normal"}` key: the runtime
+    // prunes an inherit lane of exactly one origin key whose mode equals the
+    // bone's setup inherit, so such a case would fail at `timeline.describe`
+    // for a reason that has nothing to do with the operation.
+    {
+        const auto inherit_count = [&](std::string_view label) -> double {
+            const DispatchObservation described = harness.invoke(
+                label,
+                "{\"op\":\"timeline.describe\",\"args\":{\"animation\":\"idle\"}}");
+            return number_member(described.scene_delta(), "bone_inherit_timelines")
+                .value_or(-1.0);
+        };
+        const auto first_mode =
+            [&](const DispatchObservation& observation) -> std::optional<std::string_view> {
+            const json::Value* keys = member(observation.scene_delta(), "affected_keys");
+            if (keys == nullptr || !keys->is_array() || keys->as_array().empty()) {
+                return std::nullopt;
+            }
+            return string_member(&keys->as_array().front(), "inherit");
+        };
+
+        // A2. The live setter, its echoed kind, its affected keys, and the
+        // count `timeline.describe` now reports.
+        const DispatchObservation set_first = harness.invoke(
+            "set_inherit_keyframe",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"inherit\":\"noScale\"}}");
+        harness.expect(
+            string_member(set_first.scene_delta(), "kind") ==
+                std::optional<std::string_view>("inherit"),
+            "set_inherit_keyframe",
+            "echoed kind was not \"inherit\"");
+        harness.expect(
+            first_mode(set_first) == std::optional<std::string_view>("noScale"),
+            "set_inherit_keyframe",
+            "affected_keys did not report the stored {0.25, noScale}");
+        harness.expect(
+            inherit_count("timeline.describe after set_inherit_keyframe") == 1.0,
+            "set_inherit_keyframe",
+            "timeline.describe did not report one bone_inherit_timeline");
+
+        // A3. The dry run reports the WOULD-BE mode and stores nothing.
+        const DispatchObservation dry = harness.invoke(
+            "set_inherit_keyframe dry-run",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"inherit\":\"onlyTranslation\","
+            "\"dry_run\":true}}");
+        harness.expect(
+            bool_member(dry.scene_delta(), "dry_run") == std::optional<bool>(true),
+            "set_inherit_keyframe dry-run",
+            "the response did not report dry_run=true");
+        harness.expect(
+            first_mode(dry) == std::optional<std::string_view>("onlyTranslation"),
+            "set_inherit_keyframe dry-run",
+            "affected_keys did not preview the would-be mode");
+        const DispatchObservation after_dry = harness.invoke(
+            "set_inherit_keyframe dry-run leaves the store alone",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"inherit\":\"noScale\","
+            "\"dry_run\":true}}");
+        harness.expect(
+            first_mode(after_dry) == std::optional<std::string_view>("noScale"),
+            "set_inherit_keyframe dry-run",
+            "the dry run MUTATED the stored mode");
+
+        // A4. `remove_inherit_keyframe` is registered dry_run_supported=false,
+        // and the dispatcher enforces that.
+        //
+        // The count assertion below is a WITNESS, not a detector, and the
+        // difference is measured rather than assumed. Flipping the registry
+        // flag to true does not delete the key: the handler's dry-run branch
+        // runs the primitive against `ProjectData candidate = *session.project()`
+        // and never assigns it back, so the key survives that mutation too.
+        // What actually fails is the error code -- and even that is
+        // over-determined by the `operations.list` registry-metadata guard,
+        // which predates this story. Stated here so the comment does not claim
+        // coverage the code does not have.
+        harness.invoke(
+            "remove_inherit_keyframe rejects dry_run",
+            "{\"op\":\"remove_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.25,\"dry_run\":true}}",
+            false,
+            "dry_run_unsupported");
+        harness.expect(
+            inherit_count("timeline.describe after the rejected dry run") == 1.0,
+            "remove_inherit_keyframe rejects dry_run",
+            "the rejected dry run removed the key anyway");
+
+        // A5. The generic retime path, reached with kind: "inherit" over the
+        // wire. This is the ONLY case that exercises the selector parser's
+        // inherit branch and the retime handler's materialize arm.
+        const DispatchObservation retimed = harness.invoke(
+            "timeline.retime_keyframes inherit",
+            "{\"op\":\"timeline.retime_keyframes\",\"args\":{\"keys\":[{"
+            "\"kind\":\"inherit\",\"animation\":\"idle\",\"bone\":\"spine\","
+            "\"time\":0.25}],\"delta\":0.1,\"snap\":false}}");
+        harness.expect(
+            number_member(retimed.scene_delta(), "key_count") ==
+                std::optional<double>(1.0),
+            "timeline.retime_keyframes inherit",
+            "the retime resolved no inherit key");
+        harness.expect(
+            number_member(retimed.scene_delta(), "applied_delta").value_or(-1.0) >
+                0.09,
+            "timeline.retime_keyframes inherit",
+            "the retime applied no delta");
+
+        // A6. Undo/redo, `runtime.validate` and the export-preview NON-EFFECT
+        // witness. `export.preview` reports target paths only -- it carries no
+        // timeline content at all -- so the honest assertion is that it names
+        // the same targets, byte for byte, across an inherit edit.
+        const DispatchObservation preview_before = harness.invoke(
+            "export.preview before undo", "{\"op\":\"export.preview\"}");
+        harness.invoke("runtime.validate after inherit edit",
+                       "{\"op\":\"runtime.validate\"}");
+        const double before_undo = inherit_count("timeline.describe before undo");
+        harness.invoke("undo the inherit retime", "{\"op\":\"undo\"}");
+        harness.invoke("runtime.validate after undo", "{\"op\":\"runtime.validate\"}");
+        const DispatchObservation preview_after = harness.invoke(
+            "export.preview after undo", "{\"op\":\"export.preview\"}");
+        // `targets` is an array of plain strings, so joining them IS the
+        // byte-for-byte comparison; there is no nested value to lose.
+        const auto target_list = [&](const DispatchObservation& observation) {
+            std::string joined;
+            const json::Value* targets = member(observation.scene_delta(), "targets");
+            if (targets != nullptr && targets->is_array()) {
+                for (const json::Value& entry : targets->as_array()) {
+                    joined += entry.is_string() ? std::string(entry.as_string())
+                                                : std::string("<non-string>");
+                    joined += '\n';
+                }
+            }
+            return joined;
+        };
+        harness.expect(
+            preview_before.parsed && preview_after.parsed &&
+                !target_list(preview_before).empty() &&
+                target_list(preview_before) == target_list(preview_after),
+            "export.preview",
+            "an inherit edit changed the export target list");
+        // The count is a WITNESS only, and deliberately labelled as one: a
+        // retime cannot change how many inherit timelines an animation has, so
+        // asserting the count across its undo is unfalsifiable -- exactly the
+        // H4 shape. What an undo of a retime CAN change is the key's time, so
+        // that is what is asserted below.
+        harness.expect(
+            inherit_count("timeline.describe after undo") == before_undo,
+            "undo the inherit retime",
+            "undo did not restore the previous inherit timeline count");
+
+        // The falsifiable half. A5 moved `spine`'s key from 0.25 to 0.35, so a
+        // correct undo puts it back at 0.25 and a correct redo returns it to
+        // 0.35. Read through a dry run, which reports the effective lane after
+        // the would-be merge without writing: the probe key at 0.05 is ignored.
+        const auto lane_has_time = [&](std::string_view label, double time) {
+            const DispatchObservation probe = harness.invoke(
+                label,
+                "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+                "\"bone\":\"spine\",\"time\":0.05,\"inherit\":\"noScale\","
+                "\"dry_run\":true}}");
+            const json::Value* keys = member(probe.scene_delta(), "affected_keys");
+            if (keys == nullptr || !keys->is_array()) return false;
+            for (const json::Value& entry : keys->as_array()) {
+                const auto stored = number_member(&entry, "time");
+                if (stored.has_value() && std::abs(*stored - time) <= 1e-6) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        harness.expect(
+            lane_has_time("read the lane after undo", 0.25),
+            "undo the inherit retime",
+            "undo did not move the retimed key back to 0.25");
+        harness.invoke("redo the inherit retime", "{\"op\":\"redo\"}");
+        harness.invoke("runtime.validate after redo", "{\"op\":\"runtime.validate\"}");
+        harness.expect(
+            lane_has_time("read the lane after redo", 0.35),
+            "redo the inherit retime",
+            "redo did not return the retimed key to 0.35");
+
+        // A7. Three rejections, each naming its offending value.
+        // Returns by VALUE: `string_member` views into the observation's own
+        // parsed document, which dies with the local `observation`.
+        const auto rejects = [&](std::string_view label,
+                                 std::string_view command) -> std::string {
+            const DispatchObservation observation =
+                harness.invoke(label, command, false);
+            // The dispatcher puts the reason on the response's own `message`;
+            // `error` carries only the machine-readable `code`.
+            const auto message = string_member(&observation.root, "message");
+            harness.expect(
+                message.has_value() && !message->empty(), label,
+                "the rejection carried no message");
+            return std::string(message.value_or(std::string_view{}));
+        };
+        const auto rejection_names =
+            [&](const std::string& message, std::string_view needle) {
+                return message.find(needle) != std::string::npos;
+            };
+        const std::string bad_mode = rejects(
+            "set_inherit_keyframe rejects an unknown mode",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.4,\"inherit\":\"noScales\"}}");
+        harness.expect(
+            rejection_names(bad_mode, "noScales"),
+            "set_inherit_keyframe rejects an unknown mode",
+            "the rejection did not name the offending token");
+        const std::string bad_bone = rejects(
+            "set_inherit_keyframe rejects an unknown bone",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"no_such_bone\",\"time\":0.4,\"inherit\":\"noScale\"}}");
+        harness.expect(
+            rejection_names(bad_bone, "no_such_bone"),
+            "set_inherit_keyframe rejects an unknown bone",
+            "the rejection did not name the offending bone");
+        // The third sibling parser. `timeline_lane_selectors_arg` rejects an
+        // inherit lane either way; before MAR-185 it fell through to "Unknown
+        // timeline loop-sync lane kind: inherit", which is a false statement
+        // about the vocabulary once inherit is a real kind. Asserted on the
+        // TEXT, because both spellings reject.
+        const std::string inherit_lane = rejects(
+            "timeline.set_loop_sync names inherit as unsupported, not unknown",
+            "{\"op\":\"timeline.set_loop_sync\",\"args\":{\"lanes\":[{"
+            "\"kind\":\"inherit\",\"animation\":\"idle\",\"bone\":\"spine\"}],"
+            "\"enabled\":true}}");
+        harness.expect(
+            rejection_names(inherit_lane, "does not support inherit lanes") &&
+                !rejection_names(inherit_lane, "Unknown timeline"),
+            "timeline.set_loop_sync names inherit as unsupported, not unknown",
+            "the rejection still calls inherit an unknown lane kind");
+
+        const std::string bad_time = rejects(
+            "set_inherit_keyframe rejects a negative time",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":-1,\"inherit\":\"noScale\"}}");
+        harness.expect(
+            rejection_names(bad_time, "finite") && rejection_names(bad_time, "non-negative"),
+            "set_inherit_keyframe rejects a negative time",
+            "the rejection did not name the finiteness rule");
+
+        // The live removal, which also clears the lane this block created.
+        harness.invoke(
+            "remove_inherit_keyframe",
+            "{\"op\":\"set_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.6,\"inherit\":\"onlyTranslation\"}}");
+        harness.invoke(
+            "remove_inherit_keyframe live",
+            "{\"op\":\"remove_inherit_keyframe\",\"args\":{\"animation\":\"idle\","
+            "\"bone\":\"spine\",\"time\":0.6}}");
+    }
 
     const DispatchObservation created_animation = harness.invoke(
         "animation.create",
@@ -1740,6 +4433,28 @@ int main(int argc, char** argv) {
         "{\"op\":\"project.diagnostics\"}");
     const auto dirty_before_reviews =
         bool_member(diagnostics_before_reviews.scene_delta(), "project_dirty");
+    // MAR-186 A2, the DIRTY half. By this point the suite has run many live
+    // edits, so the session is dirty and `project.unsaved_changes` is in the
+    // report. AC3's numeric compatibility says `warning_count` must still be
+    // exactly the shipped `dirty ? 1 : 0` on a project with no other warnings,
+    // and this is the only assertion anywhere that sees the dirty side of it.
+    harness.expect(
+        dirty_before_reviews == std::optional<bool>(true),
+        "MAR-186 A2",
+        "the session is not dirty here, so A2's dirty half cannot run and the "
+        "assertion below would be vacuous");
+    harness.expect(
+        number_member(diagnostics_before_reviews.scene_delta(), "warning_count") ==
+            std::optional<double>(dirty_before_reviews == std::optional<bool>(true) ? 1.0 : 0.0),
+        "MAR-186 A2",
+        "warning_count is no longer numerically the legacy dirty ? 1 : 0 on a "
+        "DIRTY issue-free project -- counting severities before appending "
+        "project.unsaved_changes leaves it one short");
+    harness.expect(
+        number_member(diagnostics_before_reviews.scene_delta(), "error_count") ==
+            std::optional<double>(0.0),
+        "MAR-186 A2",
+        "error_count is no longer 0 on an issue-free project");
     std::uint64_t last_review_id = 0U;
     std::size_t review_count = 0U;
     const auto record_review = [&](
@@ -1794,8 +4509,7 @@ int main(int argc, char** argv) {
             "import.psd_layers review",
             "{\"op\":\"import.psd_layers\",\"args\":{"
             "\"input\":\"assets/fixtures/psd_import_sample.psd\","
-            "\"output\":\"/tmp/agent_psd_import_sample.mskl\","
-            "\"atlas_output\":\"/tmp/agent_psd_import_sample.matl\",\"dry_run\":false}}"),
+            "\"staging_root\":\"/tmp/agent_psd_review\",\"dry_run\":false}}"),
         "import.psd_layers",
         "import_or_pack");
     record_review(
@@ -1836,6 +4550,9 @@ int main(int argc, char** argv) {
             target.string() + " was written before approval");
     }
     expect_file_unchanged(harness, project_file_before);
+    for (const FileSnapshot& tracked : tracked_bundle_before) {
+        expect_file_unchanged(harness, tracked);
+    }
     for (const FileSnapshot& snapshot : export_files_before) {
         expect_file_unchanged(harness, snapshot);
     }

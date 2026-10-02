@@ -215,7 +215,7 @@ bool capture_current_keyform(
             return marrow::editor::capture_current_deformer_keyform(
                 candidate,
                 *state->load_result.skeleton_data,
-                *state->preview_skeleton,
+                *state->preview_skeleton(),
                 id,
                 replace_existing);
         });
@@ -281,7 +281,7 @@ void draw_missing_geometry_capture_popup(ShellState* state) {
             AuthoringResult captured = marrow::editor::capture_current_deformer_keyform(
                 transaction.project(),
                 *state->load_result.skeleton_data,
-                *state->preview_skeleton,
+                *state->preview_skeleton(),
                 pending.deformer_id,
                 false);
             std::string field = pending.field;
@@ -495,12 +495,12 @@ void draw_preview_parameter_slider(
     const auto parameter_index = state->load_result.skeleton_data != nullptr
         ? state->load_result.skeleton_data->find_parameter_index(parameter.id)
         : std::nullopt;
-    if (parameter_index.has_value() && state->preview_skeleton != nullptr &&
-        *parameter_index < state->preview_skeleton->parameter_values().size()) {
+    if (parameter_index.has_value() && state->preview_skeleton() != nullptr &&
+        *parameter_index < state->preview_skeleton()->parameter_values().size()) {
         ImGui::SameLine();
         ImGui::TextDisabled(
             "final %.3f",
-            state->preview_skeleton->parameter_values()[*parameter_index]);
+            state->preview_skeleton()->parameter_values()[*parameter_index]);
     }
     ImGui::PopID();
 }
@@ -938,7 +938,7 @@ std::optional<double> current_binding_value(
     const ShellState& state,
     const marrow::runtime::ParameterDeformerDefinition& deformer,
     marrow::runtime::ParameterDeformerAxis axis) {
-    if (state.preview_skeleton == nullptr) return std::nullopt;
+    if (state.preview_skeleton() == nullptr) return std::nullopt;
     const auto binding = std::find_if(
         deformer.parameter_bindings.begin(),
         deformer.parameter_bindings.end(),
@@ -947,10 +947,10 @@ std::optional<double> current_binding_value(
         });
     if (binding == deformer.parameter_bindings.end() ||
         !binding->parameter_index.has_value() ||
-        *binding->parameter_index >= state.preview_skeleton->parameter_values().size()) {
+        *binding->parameter_index >= state.preview_skeleton()->parameter_values().size()) {
         return std::nullopt;
     }
-    return state.preview_skeleton->parameter_values()[*binding->parameter_index];
+    return state.preview_skeleton()->parameter_values()[*binding->parameter_index];
 }
 
 std::optional<std::size_t> current_deformer_keyform_index(

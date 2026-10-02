@@ -20,19 +20,23 @@
 #include "sokol_imgui.h"
 
 #include "macos_app_focus.hpp"
+#include "shell_frame.hpp"
 #include "shell_asset_watch.hpp"
 #include "shell_coalesced_edit.hpp"
 #include "shell_constraints.hpp"
 #include "shell_agent_panel.hpp"
 #include "shell_inspector.hpp"
+#include "shell_problems.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
+#include "shell_preferences.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
 #include "shell_viewport_ui.hpp"
 #include "shell_theme.hpp"
+#include "shell_file_paths.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
 #include "sdl_input.hpp"
@@ -494,6 +498,7 @@ void ensure_default_dock_layout(
 
     ImGui::DockBuilderDockWindow(kViewportWindowTitle, dock_center_id);
     ImGui::DockBuilderDockWindow(kTimelineWindowTitle, dock_bottom_id);
+    ImGui::DockBuilderDockWindow(kProblemsWindowTitle, dock_bottom_id);
     ImGui::DockBuilderDockWindow(kHierarchyWindowTitle, dock_left_id);
     ImGui::DockBuilderDockWindow(kProjectWindowTitle, dock_left_id);
     ImGui::DockBuilderDockWindow(kPropertiesWindowTitle, dock_left_bottom_id);
@@ -531,7 +536,6 @@ ShellFrameOutcome render_shell_frame(
         return {};
     }
 
-    sync_shell_from_editor_session_if_revised(shell_state);
     ImGui_ImplSDL3_NewFrame();
     simgui_frame_desc_t frame_desc{};
     frame_desc.width = metrics.drawable_width;
@@ -539,76 +543,7 @@ ShellFrameOutcome render_shell_frame(
     frame_desc.delta_time = std::max(delta_time, 0.000001);
     frame_desc.dpi_scale = std::max(metrics.framebuffer_scale_x, 1.0f);
     simgui_new_frame(&frame_desc);
-    // Hot-reload detection needs ~4 Hz, not one stat() sweep per frame.
-    shell_state->runtime_asset_watch_accumulator_seconds += delta_time;
-    if (!authoring_gesture_active(*shell_state) &&
-        shell_state->runtime_asset_watch_accumulator_seconds >= 0.25) {
-        shell_state->runtime_asset_watch_accumulator_seconds = 0.0;
-        (void)poll_runtime_asset_changes(shell_state);
-    }
-    advance_timeline_playback(shell_state, ImGui::GetIO().DeltaTime);
-    if (current_shell_mode(shell_state) == ShellMode::Parameter) {
-        (void)shell_state->session.advance_parameter_state(ImGui::GetIO().DeltaTime);
-        sync_shell_from_editor_session_if_revised(shell_state);
-    }
-    handle_project_history_shortcuts(shell_state);
-
-    bool reload_requested = false;
-    if (draw_menu_bar(&reload_requested, shell_state) ==
-        ProjectMenuAction::QuitRequested) {
-        window_host->request_close();
-    }
-    const ImGuiViewport* main_viewport = ImGui::GetMainViewport();
-    const ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0U, main_viewport);
-    ensure_default_dock_layout(shell_state, dockspace_id, main_viewport);
-
-    // Mode environment wash — a barely-there full-viewport tint that shifts
-    // with the working mode (Charcoal v2: setup=none, anim/paint=blue).
-    {
-        namespace t = marrow::editor::shell::theme;
-        ImVec4 wash = t::kModeSetup;
-        switch (current_shell_mode(shell_state)) {
-            case ShellMode::Animation:   wash = t::kModeAnimation; break;
-            case ShellMode::WeightPaint: wash = t::kModePaint; break;
-            case ShellMode::Parameter:   wash = t::kModeAnimation; break;
-            case ShellMode::Setup:       wash = t::kModeSetup; break;
-        }
-        if (wash.w > 0.0f) {
-            ImGui::GetBackgroundDrawList()->AddRectFilled(
-                main_viewport->WorkPos,
-                ImVec2(main_viewport->WorkPos.x + main_viewport->WorkSize.x,
-                       main_viewport->WorkPos.y + main_viewport->WorkSize.y),
-                t::u32(wash));
-        }
-    }
-    draw_project_window(&reload_requested, shell_state);
-    draw_runtime_window(*shell_state);
-    draw_constraints_window(shell_state);
-    draw_timeline_window(shell_state);
-    draw_hierarchy_window(shell_state);
-    draw_viewport_window(shell_state);
-    draw_inspector_window(shell_state);
-    if (current_shell_mode(shell_state) == ShellMode::Parameter) {
-        draw_parameter_windows(shell_state);
-    }
-    // Agent panel is closed by default; toggling rebuilds the dock layout so
-    // the column appears/disappears (no permanent empty slot when closed).
-    if (shell_state->show_agent_panel != shell_state->agent_panel_was_open) {
-        shell_state->agent_panel_was_open = shell_state->show_agent_panel;
-        shell_state->default_dock_layout_initialized = false;
-    }
-    if (shell_state->show_agent_panel) {
-        draw_agent_window(shell_state);
-    }
-
-    finalize_orphaned_inspector_transform_gesture(shell_state);
-    finalize_orphaned_viewport_transform_gesture(shell_state);
-    finalize_orphaned_viewport_ffd_gesture(shell_state);
-    finalize_orphaned_coalesced_edit(shell_state);
-
-    if (reload_requested) {
-        reload_project(shell_state);
-    }
+    draw_shell_frame(*shell_state, delta_time);
 
     sg_pass main_pass{};
     main_pass.swapchain = surface.swapchain;
@@ -644,27 +579,32 @@ int main(int argc, char** argv) {
     }
 
     const bool smoke_mode = parse_result.options.auto_close_frames.has_value();
-    const char* display_smoke_value = std::getenv("MARROW_DISPLAY_SMOKE");
-    const bool display_smoke = display_smoke_value != nullptr &&
-        std::string_view(display_smoke_value) == "1";
 #if defined(__APPLE__)
     if (parse_result.options.verify_launch_focus) {
         return run_launch_focus_verification();
     }
-    if (smoke_mode && !display_smoke) {
-        return run_headless_smoke(parse_result.options);
-    }
-#elif !defined(__APPLE__)
+#else
     if (parse_result.options.verify_launch_focus) {
         std::cout << "Launch-focus verification is only supported on macOS.\n";
         return 0;
     }
 #endif
 
+#if defined(MARROW_ENABLE_HEADLESS_SMOKE)
+    // Authoring scenarios exist only in the BUILD_TESTING executable. The
+    // product always takes the real display path, including --auto-close.
+    const char* display_smoke_value = std::getenv("MARROW_DISPLAY_SMOKE");
+    const bool display_smoke = display_smoke_value != nullptr &&
+        std::string_view(display_smoke_value) == "1";
+    if (smoke_mode && !display_smoke) {
+        return run_headless_smoke(parse_result.options);
+    }
+#endif
+
     auto window_host = create_sdl_window_host();
     WindowHostConfig window_config;
     window_config.title = std::string(marrow::editor::component_name());
-    window_config.visible = display_smoke || !smoke_mode;
+    window_config.visible = true;
     window_config.vsync = !smoke_mode;
 #if defined(__APPLE__)
     window_config.renderer_surface = RendererSurface::Metal;
@@ -727,6 +667,10 @@ int main(int argc, char** argv) {
     }
 
     ShellState shell_state;
+    // MAR-170: once, before the project opens. The remembered default curve
+    // seeds newly authored keys, so it must be in place before any authoring
+    // path can run, and it never touches the session or the project.
+    load_shell_preferences(&shell_state);
     shell_state.project_path = parse_result.options.project_path;
     shell_state.agent_listen_port = parse_result.options.agent_port;
     reload_project(&shell_state);
@@ -769,7 +713,10 @@ int main(int argc, char** argv) {
     int consecutive_skipped_frames = 0;
     bool surface_starved = false;
     std::uint64_t previous_frame_ticks = SDL_GetTicksNS();
-    while (!window_host->should_close()) {
+    // MAR-182: should_exit is the loop's ONLY exit condition, so nothing can end
+    // the process without passing the dirty-session gate. The three breaks below
+    // (frame error, surface starvation, --auto-close) stay unconditional.
+    while (!shell_state.should_exit) {
         window_host->poll_events([&](const SDL_Event& event) {
             const auto pointer_event = translate_sdl_pointer_event(event);
             if (pointer_event.has_value()) {
@@ -780,6 +727,12 @@ int main(int argc, char** argv) {
                 cancel_authoring_gestures(&shell_state, "window focus lost");
             }
         });
+        // A native close (the window button, Cmd+Q, SDL_EVENT_QUIT) is an
+        // ordinary Quit intent. When the gate holds it, the host's latch must be
+        // cleared or the request would fire again every frame.
+        if (absorb_close_request(&shell_state, window_host->should_close())) {
+            window_host->cancel_close_request();
+        }
 
         marrow::editor::AgentCommandContext agent_context{
             shell_state.session,

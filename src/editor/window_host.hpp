@@ -40,7 +40,15 @@ public:
     virtual void poll_events(const EventCallback& callback) = 0;
     virtual WindowMetrics metrics() const = 0;
     virtual bool should_close() const noexcept = 0;
-    virtual void request_close() noexcept = 0;
+    /**
+     * @brief Clears the close latch, i.e. vetoes a pending close request.
+     *
+     * There is deliberately no `request_close()`. The shell's only exit
+     * condition is `ShellState::should_exit`, set exclusively by the
+     * dirty-session intent machine; a second way to terminate would bypass the
+     * unsaved-work prompt, which is the one thing this seam exists to prevent.
+     */
+    virtual void cancel_close_request() noexcept = 0;
     virtual sg_environment graphics_environment() const noexcept = 0;
     virtual FrameSurface acquire_frame_surface() = 0;
     virtual void present() = 0;

@@ -1567,6 +1567,10 @@ std::optional<LoadError> parse_mesh_weights(
                 vertex_path,
                 "mesh vertices must have at least one bone influence");
         }
+        // The editor-side peer of this limit is
+        // `mesh_weight_model::kMaxMeshWeightInfluences`. It stays a literal
+        // here because marrow_runtime must not depend on marrow_editor; the two
+        // are kept in step by the loaders that share the number.
         if (vertex_value.as_array().size() > 4) {
             return validation_error(
                 document,

@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -15,13 +17,18 @@
 
 #include "icon_registry.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_file_paths.hpp"
 #include "timeline_graph_model.hpp"
 #include "timeline_model.hpp"
 #include "viewport_interaction_kernel.hpp"
 #include "viewport_renderer.hpp"
+#include "marrow/editor/preferences.hpp"
 #include "marrow/editor/project.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/agent_control.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
+#include "marrow/editor/problems_model.hpp"
+#include "marrow/editor/psd_reimport_review.hpp"
 #include "marrow/editor/selection.hpp"
 #include "marrow/editor/session.hpp"
 #include "session_shell_binding.hpp"
@@ -240,6 +247,7 @@ enum class WeightPaintMode {
     Paint,
     Erase,
     Smooth,
+    Replace,
 };
 
 enum class ShellMode {
@@ -255,6 +263,17 @@ struct WeightPaintSettings {
     float radius_pixels{44.0f};
     float strength{0.35f};
     bool show_heatmap{true};
+    /// Candidate bones for automatic weight generation, stored by NAME.
+    ///
+    /// By name rather than by index so a reload that renumbers bones cannot
+    /// silently retarget the set; a name that stops resolving is shown struck
+    /// through and makes Generate reject rather than being quietly dropped.
+    ///
+    /// This is a tool setting, so it is deliberately not in `ProjectData`, not
+    /// serialized to `.marrow`, not in `editor-settings.json`, not in
+    /// `PreviewState`, and not in the history snapshot -- a field undo rewrites
+    /// but `history_snapshots_equal()` does not compare would jump on Ctrl+Z.
+    std::vector<std::string> candidate_bone_names;
 };
 
 struct MeshWeightPaintTarget {
@@ -353,6 +372,10 @@ struct MeshWeightStrokeState {
     std::string group;
     ImVec2 last_sample_position{};
     bool has_last_sample{false};
+    /// Setup-pose bone transforms, resolved once per stroke rather than per
+    /// sample. A newly painted influence binds against these, so its offset
+    /// does not depend on where the playhead happens to be.
+    std::vector<marrow::runtime::BoneWorldTransform> setup_transforms;
 };
 
 enum class EditActionKind {
@@ -475,6 +498,50 @@ struct ViewportTransformGesture {
     ViewportTransformGesturePayload payload{};
 };
 
+/**
+ * @brief Everything the Problems window remembers between frames (MAR-187).
+ *
+ * `selected_identity` is the ISSUE's identity, never a row index: the report is
+ * re-collected and re-sorted whenever either revision moves, so an index would
+ * silently point at a different problem after an unrelated edit.
+ */
+/**
+ * @brief MAR-190. One open PSD reimport review, or none.
+ *
+ * `open` is what `BeginPopupModal` is given as its `bool*`. It is NOT redundant
+ * with `review`: Escape cannot close an ImGui modal (`imgui.cpp:14873` reaches
+ * the popup-closing arm only for a NON-modal popup), so the title-bar close
+ * control that a `bool*` produces is the ONLY route out of the modal that is not
+ * its own Cancel button -- and AC3 lists "modal close" as a path distinct from
+ * "cancel". Without the `bool*` that criterion is not failed, it is
+ * unimplementable, and nothing would say so.
+ */
+struct PsdReimportPanelState {
+    /// Engaged while a review is open. Disengaged by Cancel and by modal close.
+    std::optional<marrow::editor::PsdReimportReview> review;
+    /// The modal's `p_open`. Cleared by the title-bar close control.
+    bool open{false};
+    /// Where the reviewed plan staged, so it can be removed when the review ends.
+    std::filesystem::path staging_root;
+    /// Absolute path of the PSD under review; what AC1 displays.
+    std::filesystem::path source_path;
+    /// Set from `PsdReviewOutcome` when a review ends. Empty until then.
+    std::string last_outcome;
+};
+
+struct ProblemsPanelState {
+    std::optional<marrow::editor::DiagnosticReport> report;
+    marrow::editor::ProblemsView view;
+    marrow::editor::ProblemsSeverityFilter filter{
+        marrow::editor::ProblemsSeverityFilter::All};
+    /// Empty when no row is selected. Survives a refresh by identity.
+    std::string selected_identity;
+    /// The window the last activation asked to focus. Empty when none.
+    std::string focus_request;
+    /// Counts collections, so a case can prove inspection ran exactly once.
+    std::size_t collect_count{0U};
+};
+
 struct ViewportFfdSelectionScope {
     std::size_t slot_index{0U};
     std::optional<std::size_t> display_skin_index;
@@ -551,11 +618,69 @@ struct TimelineBoxSelection {
 struct TimelineRetimeGesture {
     std::uint32_t item_id{0U};
     float start_mouse_x{0.0f};
+    /// @brief The keys as they stand NOW; rewritten every applied delta.
     std::vector<TimelineKeyRef> keys;
+    /**
+     * @brief The selection as it stood when the gesture opened. MAR-185.
+     *
+     * `keys` follows the moving keys, so it cannot restore anything. This is
+     * what a cancel puts back, and it is exactly what the rolled-back project
+     * resolves.
+     */
+    std::vector<TimelineKeyRef> original_keys;
+    std::optional<TimelineKeyRef> original_active_key;
     std::vector<double> original_times;
     double applied_delta{0.0};
     bool materialized{false};
     bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+/**
+ * @brief One armed dopesheet scale drag, from the press until the dead zone.
+ *
+ * Holds no transaction, so `authoring_gesture_active` stays false until the
+ * pointer leaves the dead zone and `TimelineScaleGesture` opens one. Every
+ * frozen field is captured at the press and never re-read from the live view,
+ * which is what keeps the pixel-to-ratio mapping constant for the whole drag.
+ */
+struct TimelineScaleDragCandidate {
+    std::uint32_t item_id{0U};
+    marrow::editor::TimelineScalePivot pivot{
+        marrow::editor::TimelineScalePivot::RangeStart};
+    double press_pointer_x{0.0};
+    double pivot_time{0.0};
+    double edge_original_time{0.0};
+    double frozen_pixels_per_second{160.0};
+    double frozen_view_start_seconds{0.0};
+    double frozen_lane_min_x{0.0};
+};
+
+/**
+ * @brief One live dopesheet scale gesture owning one open transaction.
+ *
+ * `rejection` holds the last frame's reason when `scale_keyframe_times()`
+ * refused. A refused frame deliberately does NOT end the gesture: dragging a
+ * scale handle inward past a collision and back out again is ordinary, and
+ * killing the drag there would lose the edit for touching a boundary.
+ */
+struct TimelineScaleGesture {
+    std::uint32_t item_id{0U};
+    marrow::editor::TimelineScalePivot pivot{
+        marrow::editor::TimelineScalePivot::RangeStart};
+    std::vector<TimelineKeyRef> keys;
+    // The pre-gesture refs, kept because `keys` is rebuilt on every accepted
+    // frame. A cancel restores the pre-gesture times, so these resolve again
+    // and the selection survives the round trip intact.
+    std::vector<TimelineKeyRef> keys_before;
+    std::optional<TimelineKeyRef> active_key_before;
+    std::vector<double> original_times;
+    double pivot_time{0.0};
+    double edge_original_time{0.0};
+    double applied_scale{1.0};
+    bool materialized{false};
+    bool changed{false};
+    std::string rejection;
     marrow::editor::EditorSession::EditTransaction transaction;
 };
 
@@ -583,6 +708,86 @@ struct TimelineGraphViewState {
     bool needs_fit{true};
 };
 
+/** @brief What a graph drag candidate is pointed at. */
+enum class GraphDragTarget : std::uint8_t {
+    Point,
+    Handle,
+};
+
+/**
+ * @brief One live graph point drag, from the press until the pointer is released.
+ *
+ * A drag holds no transaction of its own, so `authoring_gesture_active` stays
+ * false until the pointer leaves the dead zone and an axis gesture opens.
+ * `frozen_view` is captured at the press and never re-read from the live view,
+ * which is what keeps the pixel-to-unit mapping constant for the whole drag;
+ * `press_time_seconds` and `press_value` only feed the readout.
+ */
+struct TimelineGraphPointDrag {
+    std::uint32_t item_id{0U};
+    GraphDragTarget target{GraphDragTarget::Point};
+    timeline_graph_model::DragAxis axis{timeline_graph_model::DragAxis::Undecided};
+    std::string track_id;
+    timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
+    double press_pointer_x{0.0};
+    double press_pointer_y{0.0};
+    double press_time_seconds{0.0};
+    double press_value{0.0};
+    timeline_graph_model::View frozen_view{};
+    // Handle-only. The Point path leaves these default-constructed and never
+    // reads them; the Handle path needs the frozen plot and the pressed key
+    // because its mapping is absolute rather than a delta from the press.
+    timeline_graph_model::PlotRect frozen_plot{};
+    TimelineKeyRef pressed_key{};
+    timeline_graph_model::HandleIndex handle{
+        timeline_graph_model::HandleIndex::First};
+    timeline_graph_model::SegmentFrame frame{};
+    std::array<double, 4> seed_control_points{};
+    marrow::runtime::InterpolationKind segment_kind{
+        marrow::runtime::InterpolationKind::Linear};
+};
+
+/**
+ * @brief Live handle gesture owning one open transaction.
+ *
+ * A handle drag writes only `interpolation`, so no key ever moves in time and
+ * every `TimelineKeyRef` stays bit-identical across preview, commit, cancel,
+ * undo, and redo.
+ */
+struct TimelineGraphHandleGesture {
+    std::uint32_t item_id{0U};
+    std::string track_id;
+    TimelineKeyRef key;
+    timeline_graph_model::SegmentFrame frame{};
+    marrow::runtime::InterpolationKind original_kind{
+        marrow::runtime::InterpolationKind::Linear};
+    // The authored easing at the press. `changed` is measured against this, so
+    // a drag that travels and comes back completes as a cancel.
+    std::array<double, 4> original_control_points{};
+    // MAR-171: the curve mode at the press. A drag on an automatic key is an
+    // authored change even when the control points land back on their starting
+    // values, because the key stops tracking its neighbours.
+    marrow::editor::TimelineCurveMode original_mode{
+        marrow::editor::TimelineCurveMode::Manual};
+    std::array<double, 4> applied_control_points{};
+    bool clamped_x{false};
+    bool materialized{false};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
+/** @brief Live value-axis graph gesture owning one open transaction. */
+struct TimelineGraphValueGesture {
+    std::uint32_t item_id{0U};
+    std::string track_id;
+    timeline_graph_model::Component component{timeline_graph_model::Component::Angle};
+    std::vector<TimelineKeyRef> keys;
+    double applied_delta{0.0};
+    bool materialized{false};
+    bool changed{false};
+    marrow::editor::EditorSession::EditTransaction transaction;
+};
+
 struct ParameterSliderGesture {
     std::string parameter_id;
     bool changed{false};
@@ -608,13 +813,32 @@ struct TimelineEditorState {
     TimelineGraphViewState graph_view{};
     TimelineGraphProjectionCache graph_cache{};
     TimelineClipboard clipboard;
+    // MAR-171: the driver the Graph tab's `Driver:` combo currently offers. It
+    // is UI state only — a project never stores it, and applying a mode writes
+    // it onto the selected keys rather than reading it back.
+    marrow::editor::TimelineScalarComponent curve_driver{
+        marrow::editor::TimelineScalarComponent::Angle};
     std::optional<TimelineBoxSelection> box_selection;
     std::optional<TimelineRetimeGesture> retime_gesture;
+    std::optional<TimelineScaleDragCandidate> scale_drag;
+    std::optional<TimelineScaleGesture> scale_gesture;
+    std::optional<TimelineGraphPointDrag> graph_drag;
+    std::optional<TimelineGraphValueGesture> graph_value_gesture;
+    std::optional<TimelineGraphHandleGesture> graph_handle_gesture;
 };
 
 using AgentReviewKind = marrow::editor::AgentReviewKind;
 using AgentReviewRequest = marrow::editor::AgentReviewRequest;
 using AgentActivityEntry = marrow::editor::AgentActivityEntry;
+
+// MAR-174: transient preview transport speed. Strictly positive; direction is
+// preview_reverse's job (a negative delta is a silent no-op inside
+// PreviewImpl::advance() and drops every event in AnimationState). These sit
+// ahead of ShellState because kDefaultPreviewSpeed is a member initializer.
+constexpr double kPreviewSpeedMinimum = 0.05;
+constexpr double kPreviewSpeedMaximum = 8.0;
+constexpr double kDefaultPreviewSpeed = 1.0;
+constexpr double kPreviewSpeedPresets[] = {0.25, 0.5, 1.0, 2.0};
 
 struct ShellState {
     ShellState()
@@ -655,8 +879,20 @@ struct ShellState {
     PointerMediator pointer_mediator{};
     ViewportRenderResources viewport_renderer{};
     DockLayoutState dock_layout{};
-    marrow::runtime::Skeleton* preview_skeleton{nullptr};
-    marrow::runtime::AnimationState* animation_state{nullptr};
+    // Resolve the current session view on demand: never cache these aliases in
+    // ShellState. A returned pointer must not survive a session/runtime mutation.
+    marrow::runtime::Skeleton* preview_skeleton() noexcept {
+        return marrow::editor::EditorSessionShellBinding::preview_skeleton(session);
+    }
+    const marrow::runtime::Skeleton* preview_skeleton() const noexcept {
+        return session.preview_skeleton();
+    }
+    marrow::runtime::AnimationState* animation_state() noexcept {
+        return marrow::editor::EditorSessionShellBinding::preview_animation_state(session);
+    }
+    const marrow::runtime::AnimationState* animation_state() const noexcept {
+        return session.preview_animation_state();
+    }
     marrow::editor::SelectionSet selection;
     std::optional<marrow::editor::SelectionItem> hierarchy_selection_anchor;
     std::optional<std::string> selected_timeline_track_id;
@@ -672,13 +908,58 @@ struct ShellState {
     bool preview_use_custom_mix_duration{false};
     double preview_custom_mix_duration{0.0};
     bool preview_reverse{false};
+    // MAR-174: transient preview transport speed. Shell-private and strictly
+    // positive; direction is preview_reverse's job. Never serialized, never in
+    // PreviewState, never in EditorHistorySnapshot, never in EditorPreferences.
+    // reload_project() resets it to kDefaultPreviewSpeed.
+    double preview_speed{kDefaultPreviewSpeed};
     marrow::runtime::RootMotionDelta preview_root_motion_delta{};
     marrow::runtime::RootMotionDelta preview_root_motion_total{};
     std::vector<marrow::runtime::AnimationEvent> preview_events;
     bool export_binary_output{false};
     bool project_dirty{false};
     bool default_dock_layout_initialized{false};
-    std::string saved_project_snapshot;
+    // MAR-181: the live path-chooser request, the New form, and the deferred
+    // New/Open application. These are ShellState fields rather than file-statics
+    // like the two catalog popups because ImGui::OpenPopup inside BeginMenu
+    // hashes against the MENU window's id stack and cannot open a root-level
+    // modal, and because MAR-182 must be able to observe a cancel.
+    std::optional<FilePathRequest> file_path_request;
+    std::optional<NewProjectForm> new_project_form;
+    std::optional<PendingFileApplication> pending_file_application;
+    /**
+     * MAR-183: the path a New session was created at, awaiting its FIRST
+     * successful save.
+     *
+     * Set ONLY by `apply_pending_file_action`'s create branch, and consumed
+     * ONLY by the `save_project_file` that writes this exact path. No property
+     * of the DOCUMENT distinguishes "created" from "opened" -- a New project
+     * over an existing target is legal, and its first save must still record --
+     * so the discriminator is explicit, single-purpose, and readable by a
+     * UI-free test.
+     *
+     * It holds a path rather than a bool on purpose: comparing it against the
+     * path actually written means a Save As that moves the session elsewhere
+     * cannot accidentally consume the arm.
+     */
+    std::optional<std::filesystem::path> pending_recent_on_first_save;
+    // MAR-182: the live Save/Discard/Cancel prompt, and the one condition that
+    // ends the main loop.
+    std::optional<DirtyIntentRequest> dirty_intent;
+    /// Set only by `perform_session_intent(Quit)`. The main loop's only NORMAL
+    /// exit condition, so no ordinary path can terminate the editor without
+    /// passing the dirty-session gate.
+    ///
+    /// Not the only exit *full stop*, and the loop says so itself
+    /// (`shell_main.cpp`, above `while (!shell_state.should_exit)`): three
+    /// unconditional `break`s bypass it deliberately -- a frame error, surface
+    /// starvation after 1000 consecutive unacquired drawables, and the
+    /// `--auto-close` frame budget. None is an ordinary user action and none
+    /// should consult the gate, but the absolute phrasing this comment used to
+    /// carry was wrong and a reader should not take it at face value.
+    bool should_exit{false};
+    ProblemsPanelState problems;
+    PsdReimportPanelState psd_reimport;
     std::string status_message;
     std::string error_message;
     std::vector<RuntimeAssetWatchEntry> runtime_asset_watch_entries;
@@ -690,6 +971,14 @@ struct ShellState {
     std::array<char, 128> hierarchy_filter{};
     // Active Constraints type tab: 0=IK 1=Path 2=Transform 3=Physics.
     int constraints_tab{0};
+    // MAR-170: user-local editor settings, loaded once at startup. Never
+    // participates in project history, dirty state, or revisions, and no
+    // project, runtime, or agent path reads or writes them.
+    marrow::editor::EditorPreferences preferences{};
+    marrow::editor::PreferenceLoadStatus preference_status{
+        marrow::editor::PreferenceLoadStatus::FirstRun};
+    std::filesystem::path preference_path;
+    std::string preference_diagnostic;
     // Agent surface — optional, closed by default (Ctrl+L / toolbar toggle).
     // The socket can be turned on/off at runtime from the panel.
     AgentSocketServer* agent_server{nullptr};
@@ -700,19 +989,18 @@ struct ShellState {
     marrow::editor::AgentControlState agent_control{};
 };
 
-// This member list must stay in step with cancel_authoring_gestures
-// (shell_core.cpp): the predicate gates every begin-gesture path, and the
-// cancel list releases the matching live transactions.
-inline bool authoring_gesture_active(const ShellState& state) noexcept {
-    return state.pending_edit_action.has_value() ||
-        state.animation_duration_gesture.has_value() ||
-        state.inspector_transform_gesture.has_value() ||
-        state.viewport_transform_gesture.has_value() ||
-        state.viewport_ffd_gesture.has_value() ||
-        state.parameter_slider_gesture.has_value() ||
-        state.parameter_geometry_gesture.has_value() ||
-        state.timeline_editor.retime_gesture.has_value() ||
-        state.weight_paint_stroke.active;
+// Activity and cancellation share one typed ownership list in
+// shell_gesture_lifecycle.cpp, including each owner's rollback policy.
+bool authoring_gesture_active(const ShellState& state) noexcept;
+
+/** MAR-174: clamped read of the transient preview speed. The single choke
+    point, so a corrupted or non-finite field can never reach
+    EditorSession::advance(). */
+inline double preview_playback_speed(const ShellState& state) noexcept {
+    if (!std::isfinite(state.preview_speed)) {
+        return kDefaultPreviewSpeed;
+    }
+    return std::clamp(state.preview_speed, kPreviewSpeedMinimum, kPreviewSpeedMaximum);
 }
 
 void sync_shell_from_editor_session(ShellState* state);
@@ -755,6 +1043,15 @@ constexpr char kParametersWindowTitle[] = "Parameters";
 constexpr char kParameterDeformersWindowTitle[] = "Shapes / Deformers";
 constexpr char kExpressionsWindowTitle[] = "Expressions";
 constexpr char kLipSyncWindowTitle[] = "Lip Sync";
+// MAR-187. Docked as a TAB beside the Timeline, so it renders no rows until it
+// is focused -- which is why F1 focuses it on its opening frames.
+constexpr char kProblemsWindowTitle[] = "Problems";
+
+// MAR-190. A popup's ImGui window name is the FULL string passed to
+// `BeginPopupModal`, `##` suffix included, and the frame case finds it by that
+// exact string. A MODAL, not a window: it matches no `draw_[a-z_]+windows?\(`
+// and so is invisible to `CheckFrameBodies.cmake` in both directions.
+constexpr char kPsdReimportModal[] = "Reimport PSD##psd_reimport";
 constexpr float kBoneJointHitRadiusPixels = 6.0f;
 constexpr float kBoneBodyHitThresholdPixels = 8.0f;
 constexpr float kPi = 3.14159265358979323846f;
@@ -802,10 +1099,27 @@ bool record_action_from_snapshots(
         marrow::editor::EditImpact::Runtime |
         marrow::editor::EditImpact::Preview);
 void cancel_authoring_gestures(ShellState* state, std::string_view reason);
+/** Normalizes shell working composition against the current runtime. Runtime
+ *  pointers are on-demand session views and require no refresh call. */
+void normalize_shell_preview_composition_to_runtime(ShellState* state);
 bool rebuild_project_runtime(ShellState* state);
 void update_project_dirty_state(ShellState* state);
 bool save_project_file(ShellState* state, bool update_status_message);
 bool export_runtime_assets_file(ShellState* state, bool update_status_message);
+/** MAR-181: adopts whatever project the session currently holds into every
+ *  shell-side cache, selection, preview alias and timeline field. Extracted from
+ *  reload_project so New and Open can reuse it. `project_is_clean` is a caller
+ *  intent, not a session read: reload and Open adopt a project that exists on
+ *  disk and are clean, while New is dirty from birth and its target does not
+ *  exist yet. `restore_transient_playback` is reload's own reload-vs-open flag. */
+void adopt_session_project_into_shell(
+    ShellState* state,
+    const std::string& previous_animation_name,
+    double previous_timeline_time,
+    bool previous_timeline_loop,
+    bool previous_timeline_playing,
+    bool restore_transient_playback,
+    bool project_is_clean);
 bool reload_project(ShellState* state);
 
 // Viewport renderer and geometry helpers.

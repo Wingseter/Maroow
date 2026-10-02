@@ -33,7 +33,9 @@ The current dispatcher implements edit ops: `animation.create`,
 `remove_transform_keyframe`, `set_draw_order_keyframe`,
 `remove_draw_order_keyframe`, `set_event_keyframe`,
 `remove_event_keyframe`, `set_deform_keyframe`, `remove_deform_keyframe`,
-`set_vertex_weights`, `normalize_weights`, `set_slot_color_keyframe`,
+`set_vertex_weights`, `normalize_weights`, `mesh.rebind_weights`,
+`mesh.generate_weights`,
+`set_slot_color_keyframe`,
 `remove_slot_color_keyframe`, `set_attachment_keyframe`,
 `remove_attachment_keyframe`, `edit_ik_constraint`, `edit_path_constraint`,
 `edit_transform_constraint`, `edit_physics_constraint`, `undo`, and `redo`.
@@ -65,7 +67,22 @@ There is no separate `move_bone` op - bone motion is expressed as
 - `constraints.list`: Lists IK, path, transform, and physics constraints.
 - `timeline.describe`: Summarizes authored timelines for one animation.
 - `mesh.describe`: Summarizes one mesh attachment.
-- `project.diagnostics`: Returns lightweight project diagnostics.
+- `project.diagnostics`: Returns structured project diagnostics. The four legacy
+  summary members are preserved with their exact names and types —
+  `error_count`, `warning_count`, `project_dirty`, `review_queue_count` — and
+  `issue_count` plus an `issues` array are added. `error_count` and
+  `warning_count` are now severity counts, which stays numerically identical to
+  the previous behaviour because an unsaved project contributes a
+  `project.unsaved_changes` warning of its own. Each issue carries a stable
+  `code`, a `severity`, an `identity` that is derived only from the coordinates
+  of the thing it is about (so it survives edits that move the offending record
+  within its vector), a `message`, a typed `target` (`panel`, plus an optional
+  `animation`, `vertex_index` and `selection`), an optional `family` naming the
+  project overlay vector, and an optional `safe_fix_id` drawn from a three-entry
+  allowlist: `remove_orphan_overlay`, `normalize_weights`,
+  `reset_preview_reference`. `safe_fix_id` is **omitted** rather than emitted
+  empty where no safe repair exists. Collection is read-only: it never dirties
+  the project, moves a revision, or repairs anything.
 - `export.preview`: Returns resolved export targets without writing files.
 - `runtime.validate`: Builds runtime data and returns diagnostics.
 - `compare_runtime_export`: Exports temporary JSON/binary files under `/tmp`
@@ -89,6 +106,45 @@ There is no separate `move_bone` op - bone motion is expressed as
 - `set_event_keyframe` / `remove_event_keyframe`: Edits event timelines.
 - `set_deform_keyframe` / `remove_deform_keyframe`: Edits mesh deform timelines.
 - `set_vertex_weights` / `normalize_weights`: Edits weighted mesh influences.
+  Every accepted write is canonicalized: non-positive influences are dropped,
+  duplicate bones are merged, influences are sorted by descending weight then
+  skeleton order, capped at four, and normalized. `normalize_weights` takes an
+  optional `vertices` array of indices; absent means every vertex.
+  **MAR-175 behaviour change (C1):** `set_vertex_weights` now rejects an
+  explicit `"normalize": false` with `invalid_request`. Canonicalization is
+  unconditional, so the flag has no implementable meaning -- honouring it
+  re-opens the two defects where a committed write could not be saved, and
+  ignoring it would report success for a request that was not carried out.
+  Omitting the flag and passing `true` are unaffected.
+  **MAR-175 behaviour change (C2):** `normalize_weights` now also drops, merges,
+  sorts, and caps rather than only rescaling, because the narrow version could
+  leave a project `save_project()` refuses. Its name, arguments, `no_change`
+  disposition, and the message `Mesh weights already normalized.` are unchanged.
+- `mesh.rebind_weights`: Re-expresses weighted-mesh bind offsets in each bone's
+  setup frame. Takes the same `skin`/`slot`/`attachment` triple plus an optional
+  `vertices` scope. Never changes which bones influence a vertex, never changes
+  a weight, and never touches mesh topology.
+- `mesh.generate_weights`: Regenerates a weighted mesh's influences from an
+  explicit candidate-bone set, using inverse-square distance to each candidate's
+  setup-pose bone segment (parent world origin to own world origin). Takes the
+  same `skin`/`slot`/`attachment` triple, an optional `vertices` scope, and a
+  **required** `bones` array. `bones` has no default: omitting it is a rejection,
+  not "use every bone", because silently widening the candidate set is exactly
+  what the operation must not do. An empty array, a repeated name, an
+  unresolvable name, and a bone whose setup transform is singular are all
+  rejections; a singular candidate fails the whole call rather than being
+  silently excluded. The dry-run payload carries `candidate_bone_count` in
+  addition to the family's shipped fields; the other three weight operations'
+  payloads are unchanged.
+
+  The result is **deterministic**: the same project, skeleton, candidates and
+  scope produce bit-identical weights and bind offsets across runs and across
+  the GUI, agent and MCP surfaces, independently of the playhead and of the
+  order the candidates were listed in. That guarantee holds **within one
+  binary**; cross-compiler and cross-architecture identity is not claimed,
+  because floating-point contraction is unconstrained in this build. Generation
+  is deterministic but not bit-exactly idempotent, so a repeated call may
+  legitimately report a change of a few ULPs.
 - `set_slot_color_keyframe` / `remove_slot_color_keyframe`: Edits slot RGBA timelines.
 - `set_attachment_keyframe` / `remove_attachment_keyframe`: Edits attachment timelines.
 - `edit_ik_constraint`: Modifies IK constraint properties.

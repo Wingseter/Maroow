@@ -3,12 +3,16 @@
 #include "shell_preview.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "mesh_weight_model.hpp"
+
+#include "marrow/editor/authoring.hpp"
 #include "shell_selection.hpp"
 #include "windowing.hpp"
 
@@ -24,6 +28,8 @@ const char* weight_paint_mode_name(WeightPaintMode mode) {
         return "Erase";
     case WeightPaintMode::Smooth:
         return "Smooth";
+    case WeightPaintMode::Replace:
+        return "Replace";
     }
 
     return "Paint";
@@ -51,30 +57,6 @@ ImVec4 mesh_weight_heatmap_color(double weight, float alpha) {
         return interpolate_color(green, yellow, (t - (1.0f / 3.0f)) * 3.0f);
     }
     return interpolate_color(yellow, red, (t - (2.0f / 3.0f)) * 3.0f);
-}
-
-std::optional<marrow::runtime::AttachmentVertex> inverse_transform_point_safe(
-    const marrow::runtime::BoneWorldTransform& transform,
-    double world_x,
-    double world_y) {
-    constexpr double kEpsilon = 1e-8;
-    const double determinant =
-        (static_cast<double>(transform.a) * static_cast<double>(transform.d)) -
-        (static_cast<double>(transform.b) * static_cast<double>(transform.c));
-    if (std::abs(determinant) <= kEpsilon) {
-        return std::nullopt;
-    }
-
-    const double inverse_determinant = 1.0 / determinant;
-    const double translated_x = world_x - static_cast<double>(transform.world_x);
-    const double translated_y = world_y - static_cast<double>(transform.world_y);
-    return marrow::runtime::AttachmentVertex{
-        ((translated_x * static_cast<double>(transform.d)) -
-         (translated_y * static_cast<double>(transform.b))) *
-            inverse_determinant,
-        ((translated_y * static_cast<double>(transform.a)) -
-         (translated_x * static_cast<double>(transform.c))) *
-            inverse_determinant};
 }
 
 double weight_for_bone(
@@ -117,38 +99,6 @@ std::vector<std::vector<std::size_t>> build_mesh_vertex_neighbors(
     return neighbors;
 }
 
-marrow::editor::MeshWeightAttachmentEdit build_mesh_weight_attachment_edit_from_runtime(
-    const MeshWeightPaintTarget& target,
-    const marrow::runtime::SkeletonData& skeleton) {
-    marrow::editor::MeshWeightAttachmentEdit edit;
-    edit.skin_name = target.source_skin_name;
-    edit.slot_name = target.slot_name;
-    edit.attachment_name = target.source_attachment_name;
-    if (target.source_attachment == nullptr || target.source_attachment->mesh_geometry == nullptr) {
-        return edit;
-    }
-
-    edit.vertices.reserve(target.source_attachment->mesh_geometry->weights.size());
-    for (const auto& source_vertex : target.source_attachment->mesh_geometry->weights) {
-        marrow::editor::MeshWeightVertexEdit vertex;
-        vertex.influences.reserve(source_vertex.influences.size());
-        for (const auto& source_influence : source_vertex.influences) {
-            const std::string bone_name =
-                source_influence.bone_index < skeleton.bones().size()
-                ? skeleton.bones()[source_influence.bone_index].name
-                : ("<bone " + std::to_string(source_influence.bone_index) + ">");
-            vertex.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
-                bone_name,
-                source_influence.x,
-                source_influence.y,
-                source_influence.weight});
-        }
-        edit.vertices.push_back(std::move(vertex));
-    }
-
-    return edit;
-}
-
 bool mesh_weight_vertex_equal(
     const marrow::editor::MeshWeightVertexEdit& left,
     const marrow::editor::MeshWeightVertexEdit& right,
@@ -169,49 +119,6 @@ bool mesh_weight_vertex_equal(
     }
 
     return true;
-}
-
-void normalize_mesh_weight_vertex_edit(marrow::editor::MeshWeightVertexEdit* vertex) {
-    if (vertex == nullptr) {
-        return;
-    }
-
-    auto& influences = vertex->influences;
-    influences.erase(
-        std::remove_if(
-            influences.begin(),
-            influences.end(),
-            [](const marrow::editor::MeshWeightInfluenceEdit& influence) {
-                return influence.weight <= kWeightEpsilon;
-            }),
-        influences.end());
-    if (influences.empty()) {
-        return;
-    }
-
-    if (influences.size() > 4U) {
-        std::stable_sort(
-            influences.begin(),
-            influences.end(),
-            [](const marrow::editor::MeshWeightInfluenceEdit& lhs,
-               const marrow::editor::MeshWeightInfluenceEdit& rhs) {
-                return lhs.weight > rhs.weight;
-            });
-        influences.resize(4U);
-    }
-
-    double total_weight = 0.0;
-    for (const auto& influence : influences) {
-        total_weight += influence.weight;
-    }
-    if (total_weight <= kWeightEpsilon) {
-        influences.clear();
-        return;
-    }
-
-    for (auto& influence : influences) {
-        influence.weight /= total_weight;
-    }
 }
 
 void store_mesh_weight_attachment_edit(
@@ -321,7 +228,7 @@ WeightPaintSelectionContext resolve_weight_paint_selection_context(
 std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const ShellState& state) {
     const WeightPaintSelectionContext context =
         resolve_weight_paint_selection_context(state);
-    if (!state.load_result || !state.preview_skeleton ||
+    if (!state.load_result || !state.preview_skeleton() ||
         !context.target_slot_index.has_value()) {
         return std::nullopt;
     }
@@ -349,7 +256,7 @@ std::optional<MeshWeightPaintTarget> current_mesh_weight_paint_target(const Shel
             slot_index,
             context.target_attachment->attachment_name);
     } else {
-        display_attachment = state.preview_skeleton->current_attachment(slot_index);
+        display_attachment = state.preview_skeleton()->current_attachment(slot_index);
     }
     if (display_attachment == nullptr || display_attachment->mesh_geometry == nullptr) {
         return std::nullopt;
@@ -396,12 +303,12 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     const ShellState& state,
     const ViewportLayout& layout) {
     const std::optional<MeshWeightPaintTarget> target = current_mesh_weight_paint_target(state);
-    if (!target.has_value() || !state.preview_skeleton) {
+    if (!target.has_value() || !state.preview_skeleton()) {
         return std::nullopt;
     }
 
     const std::optional<marrow::runtime::MeshAttachmentPose> pose =
-        state.preview_skeleton->evaluate_current_mesh_attachment(target->slot_index);
+        state.preview_skeleton()->evaluate_current_mesh_attachment(target->slot_index);
     if (!pose.has_value() ||
         target->display_attachment == nullptr ||
         target->display_attachment->mesh_geometry == nullptr) {
@@ -418,7 +325,7 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     overlay.triangles = geometry.triangles;
     overlay.neighbors = build_mesh_vertex_neighbors(geometry.triangles, pose->vertices.size());
     const std::vector<double>* vertex_offsets =
-        state.preview_skeleton->current_mesh_vertex_offsets(target->slot_index);
+        state.preview_skeleton()->current_mesh_vertex_offsets(target->slot_index);
     if (vertex_offsets != nullptr) {
         overlay.vertex_offsets = *vertex_offsets;
     } else {
@@ -447,11 +354,12 @@ std::optional<MeshWeightOverlay> build_mesh_weight_overlay(
     return overlay;
 }
 
-bool apply_paint_weight_to_vertex(
+bool apply_weight_to_vertex_impl(
     const ShellState& state,
     const MeshWeightOverlay& overlay,
     std::size_t vertex_index,
     double stamp_strength,
+    bool assign_stamp,
     marrow::editor::MeshWeightVertexEdit* vertex) {
     const WeightPaintSelectionContext context =
         resolve_weight_paint_selection_context(state);
@@ -460,7 +368,7 @@ bool apply_paint_weight_to_vertex(
         vertex_index >= overlay.vertices.size() ||
         *context.influence_bone_index >= state.load_result.skeleton_data->bones().size() ||
         *context.influence_bone_index >=
-            state.preview_skeleton->bone_world_transforms().size()) {
+            state.preview_skeleton()->bone_world_transforms().size()) {
         return false;
     }
 
@@ -476,39 +384,143 @@ bool apply_paint_weight_to_vertex(
         });
 
     if (influence_it == updated.influences.end()) {
-        const double offset_x =
-            (vertex_index * 2U) < overlay.vertex_offsets.size()
-                ? overlay.vertex_offsets[vertex_index * 2U]
-                : 0.0;
-        const double offset_y =
-            ((vertex_index * 2U) + 1U) < overlay.vertex_offsets.size()
-                ? overlay.vertex_offsets[(vertex_index * 2U) + 1U]
-                : 0.0;
-        const auto bind_position = inverse_transform_point_safe(
-            state.preview_skeleton
-                ->bone_world_transforms()[*context.influence_bone_index],
-            overlay.vertices[vertex_index].world_position.x,
-            overlay.vertices[vertex_index].world_position.y);
+        // A new influence binds against the SETUP pose, not the pose under the
+        // playhead. Inverting the current preview pose baked whatever the
+        // animation happened to be doing into a `.marrow`-persisted bind
+        // offset, so the same brush stroke produced different geometry
+        // depending on where the user had scrubbed. The setup-pose position is
+        // derived from the influences the vertex already carries, which are
+        // themselves setup-frame offsets, so it also carries no animation FFD
+        // by construction -- the FFD subtraction the current-pose path needed
+        // is gone with it.
+        const std::vector<marrow::runtime::BoneWorldTransform> local_setup =
+            state.weight_paint_stroke.setup_transforms.empty()
+                ? mesh_weight_model::setup_pose_bone_world_transforms(
+                      state.load_result.skeleton_data)
+                : std::vector<marrow::runtime::BoneWorldTransform>{};
+        const std::vector<marrow::runtime::BoneWorldTransform>& setup_transforms =
+            state.weight_paint_stroke.setup_transforms.empty()
+                ? local_setup
+                : state.weight_paint_stroke.setup_transforms;
+        if (updated.influences.empty() ||
+            *context.influence_bone_index >= setup_transforms.size()) {
+            return false;
+        }
+
+        double setup_world_x = 0.0;
+        double setup_world_y = 0.0;
+        double weight_total = 0.0;
+        for (const auto& existing : updated.influences) {
+            const auto existing_index = skeleton.find_bone_index(existing.bone_name);
+            if (!existing_index.has_value() || *existing_index >= setup_transforms.size()) {
+                return false;
+            }
+            const auto& transform = setup_transforms[*existing_index];
+            setup_world_x += (((existing.x * static_cast<double>(transform.a)) +
+                               (existing.y * static_cast<double>(transform.b)) +
+                               static_cast<double>(transform.world_x)) *
+                              existing.weight);
+            setup_world_y += (((existing.x * static_cast<double>(transform.c)) +
+                               (existing.y * static_cast<double>(transform.d)) +
+                               static_cast<double>(transform.world_y)) *
+                              existing.weight);
+            weight_total += existing.weight;
+        }
+        // Materialized runtime weights need not sum to one, so recover the
+        // weighted *average*. A canonical vertex is unaffected bit-for-bit.
+        if (std::abs(weight_total - 1.0) >
+            mesh_weight_model::kMeshWeightSumTolerance) {
+            if (!(weight_total > 0.0)) {
+                return false;
+            }
+            setup_world_x /= weight_total;
+            setup_world_y /= weight_total;
+        }
+
+        const auto bind_position = mesh_weight_model::inverse_transform_point_safe(
+            setup_transforms[*context.influence_bone_index],
+            setup_world_x,
+            setup_world_y);
         if (!bind_position.has_value()) {
             return false;
         }
 
         updated.influences.push_back(marrow::editor::MeshWeightInfluenceEdit{
             active_bone_name,
-            static_cast<double>(bind_position->x) - offset_x,
-            static_cast<double>(bind_position->y) - offset_y,
+            static_cast<double>(bind_position->x),
+            static_cast<double>(bind_position->y),
             0.0});
         influence_it = updated.influences.end() - 1;
     }
 
-    influence_it->weight += stamp_strength;
-    normalize_mesh_weight_vertex_edit(&updated);
-    if (updated.influences.empty() || mesh_weight_vertex_equal(*vertex, updated)) {
+    // Paint is a rate: it accumulates toward the active bone. Replace is a
+    // target: the stamp is the weight the active bone should END UP with, and
+    // the remaining influences are scaled to fill what is left. Assigning the
+    // stamp as a *raw* weight and letting normalization sort it out cannot
+    // express that -- at strength 1.0 it yields 1/(1 + others), never the full
+    // 1.0 a Replace brush exists to paint in one pass.
+    const std::size_t active_index =
+        static_cast<std::size_t>(influence_it - updated.influences.begin());
+    if (assign_stamp) {
+        const double target = std::clamp(stamp_strength, 0.0, 1.0);
+        double others_total = 0.0;
+        for (std::size_t index = 0; index < updated.influences.size(); ++index) {
+            if (index != active_index) {
+                others_total += updated.influences[index].weight;
+            }
+        }
+        if (target >= 1.0 - mesh_weight_model::kMeshWeightEpsilon) {
+            for (std::size_t index = 0; index < updated.influences.size(); ++index) {
+                if (index != active_index) {
+                    updated.influences[index].weight = 0.0;
+                }
+            }
+            updated.influences[active_index].weight = 1.0;
+        } else {
+            if (others_total > 0.0) {
+                const double scale = (1.0 - target) / others_total;
+                for (std::size_t index = 0; index < updated.influences.size(); ++index) {
+                    if (index != active_index) {
+                        updated.influences[index].weight *= scale;
+                    }
+                }
+            }
+            updated.influences[active_index].weight = target;
+        }
+    } else {
+        updated.influences[active_index].weight += stamp_strength;
+    }
+    // A vertex whose influence list cannot be made canonical makes this one
+    // sample a no-op rather than killing the stroke.
+    if (!mesh_weight_model::canonicalize_mesh_weight_vertex(skeleton, &updated).empty()) {
+        return false;
+    }
+    if (mesh_weight_vertex_equal(*vertex, updated)) {
         return false;
     }
 
     *vertex = std::move(updated);
     return true;
+}
+
+bool apply_paint_weight_to_vertex(
+    const ShellState& state,
+    const MeshWeightOverlay& overlay,
+    std::size_t vertex_index,
+    double stamp_strength,
+    marrow::editor::MeshWeightVertexEdit* vertex) {
+    return apply_weight_to_vertex_impl(
+        state, overlay, vertex_index, stamp_strength, false, vertex);
+}
+
+bool apply_replace_weight_to_vertex(
+    const ShellState& state,
+    const MeshWeightOverlay& overlay,
+    std::size_t vertex_index,
+    double stamp_strength,
+    marrow::editor::MeshWeightVertexEdit* vertex) {
+    return apply_weight_to_vertex_impl(
+        state, overlay, vertex_index, stamp_strength, true, vertex);
 }
 
 bool apply_erase_weight_to_vertex(
@@ -545,8 +557,10 @@ bool apply_erase_weight_to_vertex(
     }
 
     influence_it->weight = std::max(0.0, influence_it->weight - stamp_strength);
-    normalize_mesh_weight_vertex_edit(&updated);
-    if (updated.influences.empty() || mesh_weight_vertex_equal(*vertex, updated)) {
+    if (!mesh_weight_model::canonicalize_mesh_weight_vertex(skeleton, &updated).empty()) {
+        return false;
+    }
+    if (mesh_weight_vertex_equal(*vertex, updated)) {
         return false;
     }
 
@@ -555,6 +569,7 @@ bool apply_erase_weight_to_vertex(
 }
 
 bool apply_smooth_weight_to_vertex(
+    const marrow::runtime::SkeletonData& skeleton,
     const std::vector<marrow::editor::MeshWeightVertexEdit>& source_vertices,
     const MeshWeightOverlay& overlay,
     std::size_t vertex_index,
@@ -672,8 +687,10 @@ bool apply_smooth_weight_to_vertex(
             blended_weight});
     }
 
-    normalize_mesh_weight_vertex_edit(&updated);
-    if (updated.influences.empty() || mesh_weight_vertex_equal(*vertex, updated)) {
+    if (!mesh_weight_model::canonicalize_mesh_weight_vertex(skeleton, &updated).empty()) {
+        return false;
+    }
+    if (mesh_weight_vertex_equal(*vertex, updated)) {
         return false;
     }
 
@@ -700,6 +717,8 @@ std::string weight_paint_stroke_label(
         return "Erased " + bone_name + " weights on " + target.source_attachment_name;
     case WeightPaintMode::Smooth:
         return "Smoothed weights on " + target.source_attachment_name;
+    case WeightPaintMode::Replace:
+        return "Replaced " + bone_name + " weights on " + target.source_attachment_name;
     }
 
     return "Edited mesh weights";
@@ -715,6 +734,7 @@ void reset_weight_paint_stroke(ShellState* state) {
     state->weight_paint_stroke.label.clear();
     state->weight_paint_stroke.group.clear();
     state->weight_paint_stroke.has_last_sample = false;
+    state->weight_paint_stroke.setup_transforms.clear();
 }
 
 void begin_weight_paint_stroke(
@@ -736,6 +756,10 @@ void begin_weight_paint_stroke(
         "mesh-weight:" + target.source_skin_name + ":" + target.slot_name + ":" +
         target.source_attachment_name;
     state->weight_paint_stroke.has_last_sample = false;
+    // Resolved once per stroke, not once per sample.
+    state->weight_paint_stroke.setup_transforms =
+        mesh_weight_model::setup_pose_bone_world_transforms(
+            state->load_result.skeleton_data);
 }
 
 bool finish_weight_paint_stroke(ShellState* state) {
@@ -773,7 +797,8 @@ bool apply_weight_paint_sample(
     const WeightPaintSelectionContext selection_context =
         resolve_weight_paint_selection_context(*state);
     if ((state->weight_paint.mode == WeightPaintMode::Paint ||
-         state->weight_paint.mode == WeightPaintMode::Erase) &&
+         state->weight_paint.mode == WeightPaintMode::Erase ||
+         state->weight_paint.mode == WeightPaintMode::Replace) &&
         (!selection_context.influence_bone_index.has_value() ||
          *selection_context.influence_bone_index >=
              state->load_result.skeleton_data->bones().size())) {
@@ -781,9 +806,14 @@ bool apply_weight_paint_sample(
     }
 
     marrow::editor::MeshWeightAttachmentEdit next_edit =
-        build_mesh_weight_attachment_edit_from_runtime(
-            overlay.target,
-            *state->load_result.skeleton_data);
+        overlay.target.source_attachment != nullptr
+            ? mesh_weight_model::mesh_weight_edit_from_runtime(
+                  *state->load_result.skeleton_data,
+                  overlay.target.source_skin_name,
+                  overlay.target.slot_name,
+                  overlay.target.source_attachment_name,
+                  *overlay.target.source_attachment)
+            : marrow::editor::MeshWeightAttachmentEdit{};
     if (next_edit.vertices.empty()) {
         return false;
     }
@@ -830,8 +860,17 @@ bool apply_weight_paint_sample(
                 stamp_strength,
                 &next_edit.vertices[vertex_index]);
             break;
+        case WeightPaintMode::Replace:
+            vertex_changed = apply_replace_weight_to_vertex(
+                *state,
+                overlay,
+                vertex_index,
+                stamp_strength,
+                &next_edit.vertices[vertex_index]);
+            break;
         case WeightPaintMode::Smooth:
             vertex_changed = apply_smooth_weight_to_vertex(
+                *state->load_result.skeleton_data,
                 smooth_source_vertices,
                 overlay,
                 vertex_index,
@@ -902,5 +941,188 @@ bool apply_weight_paint_sample(
         WeightPaintSample{screen_position, 1.0f});
 }
 
+namespace {
+
+/// Resolves the current weight target into the primitive's target triple plus
+/// the runtime attachment the overlay materializes from.
+struct ResolvedWeightCommandTarget {
+    marrow::editor::MeshWeightTarget target;
+    const marrow::runtime::AttachmentData* attachment{nullptr};
+    std::string attachment_label;
+};
+
+std::optional<ResolvedWeightCommandTarget> resolve_weight_command_target(
+    const ShellState& state) {
+    const std::optional<MeshWeightPaintTarget> paint_target =
+        current_mesh_weight_paint_target(state);
+    if (!paint_target.has_value() || paint_target->source_attachment == nullptr ||
+        paint_target->source_attachment->mesh_geometry == nullptr) {
+        return std::nullopt;
+    }
+    ResolvedWeightCommandTarget resolved;
+    resolved.target = marrow::editor::MeshWeightTarget{
+        paint_target->source_skin_name,
+        paint_target->slot_name,
+        paint_target->source_attachment_name};
+    resolved.attachment = paint_target->source_attachment;
+    resolved.attachment_label = paint_target->source_attachment_name;
+    return resolved;
+}
+
+/// Runs one weight primitive inside one transaction and records one history
+/// entry. A result that changes nothing commits nothing, which is the GUI
+/// analogue of the agent operations' `no_change` disposition.
+bool run_weight_command(
+    ShellState* state,
+    std::string_view label_prefix,
+    const std::function<marrow::editor::MeshWeightResult(
+        marrow::editor::ProjectData*,
+        const marrow::editor::MeshWeightTarget&,
+        const marrow::runtime::AttachmentData&)>& apply) {
+    if (state == nullptr || !state->load_result) {
+        return false;
+    }
+    if (state->pending_edit_action.has_value() || state->weight_paint_stroke.active) {
+        state->status_message = "Finish the active edit before editing weights";
+        return false;
+    }
+    const auto resolved = resolve_weight_command_target(*state);
+    if (!resolved.has_value()) {
+        state->status_message = "Select a mesh attachment to edit weights";
+        return false;
+    }
+
+    const std::string label =
+        std::string(label_prefix) + " weights on " + resolved->attachment_label;
+    auto transaction = state->session.begin_edit({
+        marrow::editor::EditKind::EditProperty,
+        label,
+        "mesh-weight-command:" + resolved->target.skin_name + ":" +
+            resolved->target.slot_name + ":" + resolved->target.attachment_name,
+        false,
+        marrow::editor::EditImpact::Project | marrow::editor::EditImpact::Runtime |
+            marrow::editor::EditImpact::Preview});
+    if (!transaction) {
+        state->error_message = transaction.error()->format();
+        return false;
+    }
+
+    const marrow::editor::MeshWeightResult result =
+        apply(transaction.project(), resolved->target, *resolved->attachment);
+    if (!result) {
+        transaction.cancel();
+        state->error_message = result.error;
+        state->status_message = result.error;
+        return false;
+    }
+    if (!result.changed) {
+        transaction.cancel();
+        state->status_message = label + ": nothing to change";
+        return true;
+    }
+
+    const marrow::editor::SessionResult commit = transaction.commit();
+    if (!commit) {
+        state->error_message = commit.error->format();
+        return false;
+    }
+    sync_shell_from_editor_session(state);
+    state->status_message = label;
+    return true;
+}
+
+} // namespace
+
+std::vector<std::size_t> weight_command_scope(const ShellState& state) {
+    std::vector<std::size_t> scope;
+    if (!state.viewport_ffd_selection.has_value() ||
+        state.viewport_ffd_selection->vertex_indices.empty()) {
+        return scope;
+    }
+    const std::optional<MeshWeightPaintTarget> target =
+        current_mesh_weight_paint_target(state);
+    if (!target.has_value() ||
+        state.viewport_ffd_selection->scope.slot_index != target->slot_index ||
+        state.viewport_ffd_selection->scope.deform_attachment_name !=
+            target->source_attachment_name) {
+        // A selection that belongs to a different slot or attachment does not
+        // narrow this command; falling back to "every vertex" matches the
+        // shipped agent behaviour rather than silently editing the wrong thing.
+        return scope;
+    }
+    scope = state.viewport_ffd_selection->vertex_indices;
+    return scope;
+}
+
+bool normalize_weights_command(ShellState* state) {
+    const std::vector<std::size_t> scope =
+        state != nullptr ? weight_command_scope(*state) : std::vector<std::size_t>{};
+    return run_weight_command(
+        state,
+        "Normalized",
+        [&](marrow::editor::ProjectData* project,
+            const marrow::editor::MeshWeightTarget& target,
+            const marrow::runtime::AttachmentData& attachment) {
+            return marrow::editor::normalize_mesh_weights(
+                project, *state->load_result.skeleton_data, attachment, target, scope);
+        });
+}
+
+bool rebind_weights_command(ShellState* state) {
+    const std::vector<std::size_t> scope =
+        state != nullptr ? weight_command_scope(*state) : std::vector<std::size_t>{};
+    return run_weight_command(
+        state,
+        "Rebound",
+        [&](marrow::editor::ProjectData* project,
+            const marrow::editor::MeshWeightTarget& target,
+            const marrow::runtime::AttachmentData& attachment) {
+            return marrow::editor::rebind_mesh_weights(
+                project, *state->load_result.skeleton_data, attachment, target, scope);
+        });
+}
+
+bool generate_weights_command(ShellState* state) {
+    const std::vector<std::size_t> scope =
+        state != nullptr ? weight_command_scope(*state) : std::vector<std::size_t>{};
+    const std::vector<std::string> candidates =
+        state != nullptr ? state->weight_paint.candidate_bone_names
+                         : std::vector<std::string>{};
+    return run_weight_command(
+        state,
+        "Generated",
+        [&](marrow::editor::ProjectData* project,
+            const marrow::editor::MeshWeightTarget& target,
+            const marrow::runtime::AttachmentData& attachment) {
+            return marrow::editor::generate_mesh_weights(
+                project,
+                *state->load_result.skeleton_data,
+                attachment,
+                target,
+                candidates,
+                scope);
+        });
+}
+
+bool set_active_vertex_weights_command(
+    ShellState* state,
+    std::size_t vertex_index,
+    const std::vector<marrow::editor::MeshWeightInfluenceEdit>& influences) {
+    marrow::editor::MeshWeightVertexEdit requested;
+    requested.influences = influences;
+    return run_weight_command(
+        state,
+        "Edited",
+        [&](marrow::editor::ProjectData* project,
+            const marrow::editor::MeshWeightTarget& target,
+            const marrow::runtime::AttachmentData& attachment) {
+            return marrow::editor::set_mesh_vertex_weights(
+                project,
+                *state->load_result.skeleton_data,
+                attachment,
+                target,
+                {{vertex_index, requested}});
+        });
+}
 
 } // namespace marrow::editor::shell

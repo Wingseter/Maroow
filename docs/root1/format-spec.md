@@ -13,8 +13,9 @@ parameter-model extension, and the independent MAR-156 user-preference document.
 
 ## `editor-settings.json` v1
 
-Purpose: versioned, user-local editor preferences shared by later curve-default and Recent Projects
-features. This file is not a project or runtime asset and is never embedded in `.marrow`, `.mskl`,
+Purpose: versioned, user-local editor preferences. `default_curve` is consumed by
+MAR-170's remembered default curve; `recent_projects` is round-tripped and its
+Recent Projects UI is still future work. This file is not a project or runtime asset and is never embedded in `.marrow`, `.mskl`,
 `.mbin`, or `.matl`.
 
 The v1 wire document is:
@@ -203,6 +204,21 @@ Keyframe fields vary by timeline type but always include `time` and may include 
 - `"linear"`
 - `"stepped"`
 - `[cx1, cy1, cx2, cy2]`
+
+Both the `.marrow` and `.mskl` loaders reject a cubic curve whose `cx1` or `cx2`
+falls outside `[0, 1]`, because that range is what makes the runtime's
+`X(t) = alpha` inverse single-valued. The editor's authoring path guarantees the
+same predicate: the graph clamps a dragged x control point into `[0, 1]` and the
+shared authoring primitive rejects any out-of-range or non-finite value
+atomically, while `cy1` and `cy2` allow finite overshoot outside `[0, 1]`. All
+six fixed MAR-170 curve presets satisfy this by construction, before and after
+`float32` narrowing, and none of them overshoots, so overshoot remains reachable
+only through a manual handle drag. Every MAR-171 **automatic** curve satisfies it
+by construction too, and for a stronger reason: normalizing a cubic Hermite
+segment to the unit square produces `cx1 = 1/3` and `cx2 = 2/3` identically, not
+by clamping, so `X(t) = t` exactly and the inverse is the identity. The same
+algebra bounds `cy1` and `cy2` into `[0, 1]`, so an automatic curve can never
+overshoot either. No field and no version changes as a result.
 
 ### `mixing`
 
@@ -649,6 +665,7 @@ Top-level keys:
 - `runtime`
 - `editor`
 - `snap`
+- `loop_sync`
 - `animation_edits`
 - `timeline_edits`
 - `mesh_edits`
@@ -676,6 +693,7 @@ Common fields:
 - `notes`
 - `viewport`
 - `timeline`
+- `import_sources`
 
 `viewport` currently includes:
 
@@ -688,6 +706,39 @@ Common fields:
 `timeline` is optional and currently stores `fps`, a finite positive editor
 display/snap rate. It defaults to `60` for existing projects. Timeline zoom and
 pan are presentation state and do not alter animation duration.
+
+`import_sources` is optional and absent from every project written before
+MAR-188. It records where a project's art came from and which PSD layer became
+which runtime target. Only `psd` is defined today; the object exists so a second
+source format can be added without moving the ones already stored. An
+`import_sources` with no `psd` is written as an ABSENT key rather than as `{}`.
+
+```json
+"import_sources": {
+  "psd": {
+    "path": "art/hero.psd",
+    "layers_directory": "art/hero_layers",
+    "layers": [
+      { "group_path": ["torso"], "layer": "body",
+        "slot": "body", "attachment": "body", "bone": "torso",
+        "image": "body.png" }
+    ]
+  }
+}
+```
+
+- `path` and `layers_directory` are **project-relative** and are rewritten by a
+  Save As, as the sixth path family. Both are required and neither may be empty.
+- `layers` is optional; absent and empty both mean "no mapping yet", which is a
+  real state for a source that has been named but not yet committed.
+- A layer's identity is `(group_path, layer_name)` — the exact strings Photoshop
+  stored, before slot de-duplication. Two entries sharing an identity are refused
+  at load, because a provenance record that cannot key itself is malformed.
+- `image` is a bare file NAME resolved against `layers_directory`, never a path.
+  A value containing a directory separator is refused at load. An extracted layer
+  image is always a direct child of the layer directory, so a stored path could
+  only ever restate the directory once per layer; keeping it a name holds the
+  Save As rebase surface to two fields.
 
 ### `snap`
 
@@ -733,6 +784,90 @@ also defaults magnetic snapping to off.
 - `snap` never enters `.mskl` or `.mbin` export and does not change runtime
   format versions, C ABI v1, or the Agent/MCP surface.
 
+### `loop_sync`
+
+Optional per-**lane** loop-boundary synchronization intent (MAR-172), stored as
+one top-level tree that mirrors the shape of `timeline_edits.animations`. Absent
+from every project that has not opted in, so every existing project serializes
+byte-identically and behaves identically.
+
+```json
+"loop_sync": {
+  "animations": {
+    "idle": {
+      "bones":  { "spine": { "rotate": true } },
+      "slots":  { "body":  { "color":  true } },
+      "deform": { "body":  { "body_mesh": true } }
+    },
+    "aim": { "bones": { "arm_l": { "rotate": true } } }
+  }
+}
+```
+
+- Every leaf is a boolean. `true` means the lane is opted in; `false` is accepted
+  on load, means opted out, and round-trips as absence. Only opted-in lanes are
+  written, and an animation, category, bone, or slot object with nothing under it
+  is not emitted, so an orphan entry is unrepresentable on the write side.
+- **Why a top-level tree and not a member of the lane's own value.** A lane's
+  `timeline_edits` value is a bare *array*, so there is no lane object to hold a
+  member; promoting it to an object would make an opted-in project fail to load
+  in a build that has never heard of `loop_sync`. The top-level block degrades
+  gracefully instead: an older build preserves the unknown member through
+  `preserved_root`, loads the timeline normally, and plays the loop correctly —
+  it simply stops maintaining it. The usual staleness hazard of a side table does
+  not apply, because a lane key `(animation, bone, channel)` is invariant under
+  retime, insertion, deletion, and paste, and animation rename and delete already
+  move or erase the whole lane struct that owns the boolean.
+- **Only three families can be opted in**: bone transform (all four channels),
+  slot light-color, and mesh deform. Each carries a continuous, copyable value
+  and a shared `curve`. Draw order, events, and slot attachment are piecewise
+  constant, already wrap without an interpolation artifact, and an event key at
+  the boundary would fire twice per loop; their lane structs gain no member, so
+  the exclusion is compile-enforced rather than branch-enforced.
+- **The managed key is derived, never stored.** On an opted-in lane the managed
+  boundary key *is* the key at `float32(explicit duration)`, which by contract is
+  that lane's last key. No per-key marker exists, so no marker can travel through
+  a copy/paste into a lane where it would be a lie, and adopting an existing key
+  at that time needs no code at all.
+- **A derived key is never authored directly.** The GUI skips a managed boundary
+  key in every value, easing, preset, and curve-mode selection and reports the
+  skip, because a dopesheet box selection routinely spans one; the Agent rejects
+  it atomically, because a scripted selector list does not. Removing one is
+  filtered in the GUI and rejected by the Agent. The contract owns a lane's last
+  key only when that key satisfies one half of the contract — it already sits at
+  the boundary, or it is still the bit-exact mirror of the key at time zero that
+  a previous synchronization wrote — so a last key satisfying neither is authored
+  data and the boundary is created beside it rather than promoted from it.
+- **The contract.** For every opted-in lane, the last key sits at
+  `float32(duration)` exactly; its every value component equals the lane's first
+  key's corresponding component bit for bit; its `curve` — and its `curve_mode`
+  and `curve_driver` — equal the first key's bit for bit; and no other key of the
+  lane is within one millisecond of the boundary. Synchronization is
+  one-directional: the key at time zero is authored and always wins.
+- **Load validation**, each rejection carrying a JSON path such as
+  `$.loop_sync.animations.idle.bones.spine.rotate`: `loop_sync` must be an
+  object; it requires an `animations` object; every animation, category, bone,
+  and slot value must be an object; a `bones.<bone>` key must be `rotate`,
+  `translate`, `scale`, or `shear`; a `slots.<slot>` key must be `color`; a leaf
+  must be a boolean; a `true` leaf requires a matching `timeline_edits` lane; and
+  that lane's first keyframe must be at time zero. The explicit-duration
+  prerequisite is deliberately **not** checked at load — the parser runs before
+  any animation catalog exists and `animation_edits` in the same document can
+  author the very duration in question — and a stale boundary key is legal data
+  that load never rewrites; the first transaction reconciles it, or rejects and
+  names both remedies.
+- **Save validation** re-checks the two structural rules a skeleton-free
+  validator can see: an opted-in lane must hold at least one keyframe, and its
+  first keyframe must be at time zero.
+- Unknown members *inside* the `loop_sync` tree are dropped on save, exactly as
+  they already are inside `timeline_edits`, which this tree mirrors. A future
+  story needing richer per-lane data should promote a leaf from `true` to an
+  object and add a preserved source at that point.
+- `loop_sync` never enters `.mskl` or `.mbin` export and does not change runtime
+  format versions, C ABI v1, or `editor-settings.json` v1. The **managed boundary
+  key does** reach the export, as an ordinary keyframe of the family the lane
+  already writes, which is the entire point.
+
 ### `animation_edits`
 
 Optional ordered animation-catalog operations applied to the referenced base skeleton before
@@ -753,7 +888,8 @@ Optional ordered animation-catalog operations applied to the referenced base ske
   against the catalog produced by all preceding operations. The value must be finite, non-negative,
   representable by runtime animation-time storage, and no shorter than the target's last authored key.
   The editor stores the normalized applied value and never substitutes `max(requested, inferred)` for
-  an invalid manual request.
+  an invalid manual request. A managed loop boundary key does not constrain the duration it follows
+  (see `loop_sync`), so an opted-in clip stays shortenable down to its last real authored key.
 - `delete` removes the animation plus its mixing entries and editor timeline overlays.
 - Operations are applied in array order. Empty names, missing sources, duplicate destinations, and deleting the last remaining animation are rejected.
 - Creating or moving a key past an existing explicit boundary extends that boundary in the same
@@ -768,6 +904,7 @@ Optional ordered animation-catalog operations applied to the referenced base ske
 Editor-side overrides that have not yet been exported into runtime assets:
 
 - bone transform edits
+- bone inherit edits
 - mesh deform edits
 - draw-order edits
 - event edits
@@ -775,6 +912,166 @@ Editor-side overrides that have not yet been exported into runtime assets:
 - slot attachment edits
 
 The exported runtime path merges these edits back into the `.mskl` animation layout.
+
+#### `curve_mode` and `curve_driver` (MAR-171, project-local)
+
+A **bone transform** keyframe object and a **slot light-color** keyframe object
+may each carry two optional string members beside the `curve` field they
+qualify:
+
+| Member | Values | Absent means |
+| --- | --- | --- |
+| `curve_mode` | `"manual"` \| `"auto"` | `"manual"` |
+| `curve_driver` | `"angle"` \| `"x"` \| `"y"` \| `"r"` \| `"g"` \| `"b"` \| `"a"` | the family's lowest-indexed component |
+
+`curve_mode` records *why* the stored `curve` holds the numbers it holds.
+`"manual"` is the pre-MAR-171 behaviour: the stored easing is exactly what the
+animator put there. `"auto"` records that the stored easing is a derived value
+the editor recomputes from the driver's neighbouring keys whenever they move.
+The stored `curve` remains authoritative for every reader — both file formats,
+the runtime, and any older editor build — so a build that has never heard of
+these members reads the file correctly.
+
+`curve_driver` names which scalar series drives the computation, and must be one
+the keyframe's own family owns:
+
+| Family | Authorable drivers |
+| --- | --- |
+| `rotate` | `angle` |
+| `translate`, `scale`, `shear` | `x`, `y` |
+| slot color | `r`, `g`, `b`, `a` |
+
+Mesh deform, draw-order, event, and slot-attachment keyframes carry **no** curve
+mode at all. A deform key's value is a vertex-offset vector with no canonical
+scalar to drive a tangent, and the discrete families carry no easing.
+
+Validation is strict rather than lenient. A non-string or unknown `curve_mode`,
+a non-string or unknown `curve_driver`, a driver the family does not own, and a
+`curve_driver` present while `curve_mode` is absent or `"manual"` are each a
+load error with the keyframe's own JSON path. Accepting and silently dropping a
+driver would lose authored data on the next save; accepting and silently keeping
+one would create an in-memory state that never round-trips.
+
+The serializer writes the pair **only** when `curve_mode` is `"auto"`, so a
+project with no automatic key serializes byte-identically to a pre-MAR-171
+build. Neither member ever enters `.mskl` or `.mbin`: the runtime sees only the
+resolved `curve`, `.mskl` stays version 1, and `.mbin` stays version 2. Loading
+never resolves, so a hand-edited document may legally hold `"curve_mode":
+"auto"` beside a `curve` the editor would not produce; the stored numbers win,
+and `timeline.set_curve_mode` is the explicit way to reconcile them.
+
+Keyframe objects have never preserved unknown members — the parser builds a
+fresh record and the serializer builds a fresh object — so this is the one
+`.marrow.snap` discipline MAR-171 cannot reproduce. That is pre-existing
+behaviour, unchanged here, and recorded as a known limitation.
+
+#### `inherit` (MAR-184, stepped)
+
+A bone object under `timeline_edits.animations.<animation>.bones.<bone>` may
+carry an `inherit` array beside `rotate`/`translate`/`scale`/`shear` — the same
+nesting the runtime uses, so the overlay is a direct member assignment at
+materialization time:
+
+```json
+"timeline_edits": {
+  "animations": {
+    "toggle_inherit": {
+      "bones": {
+        "child": {
+          "inherit": [
+            { "time": 0.0,  "inherit": "normal" },
+            { "time": 0.25, "inherit": "noRotationOrReflection" },
+            { "time": 0.5,  "inherit": "onlyTranslation" }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+Each keyframe carries exactly `time` (a number, seconds) and `inherit` (one of
+the five runtime tokens: `normal`, `onlyTranslation`, `noRotationOrReflection`,
+`noScale`, `noScaleOrReflection`). Inherit keys are **stepped**: the runtime
+samples them piecewise-constant, and no easing is stored or read. Key identity
+is the time, compared at `1e-6`; there is no same-time ordinal, because times
+are strictly increasing by construction.
+
+Validation, with the offending keyframe's own JSON path on every row:
+
+| Condition | Message | Runtime also rejects? |
+| --- | --- | --- |
+| timeline value is not an array | `require_type` | yes |
+| array is empty | `inherit timeline edits must contain at least one keyframe` | yes |
+| keyframe is not an object | `require_type` | yes |
+| `time` missing or non-number | `read_required_number` | yes |
+| `time` not finite, outside the float32 range, or negative | `inherit keyframe time must be finite and non-negative` | **no** |
+| `inherit` missing or non-string | `require_member` | yes |
+| `inherit` not one of the five | `inherit mode must be one of normal, onlyTranslation, noRotationOrReflection, noScale, or noScaleOrReflection` | yes |
+| times not strictly increasing | `inherit timeline edit keyframe times must be strictly increasing` | yes |
+| keyframe carries a `curve` member | `inherit keys are stepped and must not carry curve data` | **no** |
+
+**Two rows are stronger than the runtime, and the asymmetry is deliberate.** The
+runtime's own inherit parser starts with no previous time, so it accepts a
+negative *first* key; and it reads exactly `time` and `inherit`, ignoring any
+other member, so a `.mskl` carrying `{"time": 0, "inherit": "normal", "curve":
+"stepped"}` loads clean today and Marrow ignores the `curve`. Adding either
+rejection to the runtime parser would make previously valid `.mskl` files stop
+loading, which the format-version guarantee forbids. The rejection therefore
+lives on the **overlay**, where it costs nothing: the editor is the only thing
+that writes one, and a `.marrow` keyframe object has never preserved unknown
+members — so accepting a `curve` here would mean silently dropping the animator's
+easing on the next save.
+
+An inherit edit whose keyframe array is empty is **skipped by both serializers**
+rather than written. `ensure_bone_inherit_timeline_edit` legitimately creates one
+for a bone with no imported track — that is what a project-only timeline is
+before its first key lands — and writing `"inherit": []` would produce a
+`.marrow` this parser refuses to reload and a `.mskl` the runtime refuses to
+load.
+
+The key is purely additive and no version moves: `.mskl` stays version 1,
+`.mbin` stays version 2, `.marrow` still has no version field, and a build that
+has never heard of `inherit` walks past it on the `continue` its transform
+parser has always taken for an unrecognised channel key — exactly as today.
+
+##### Editing rules (MAR-185)
+
+MAR-185 makes these keys first-class timeline keys — selectable, retimeable,
+scalable, copy/pasteable, removable, and reachable from the agent — without
+changing one byte of the on-disk shape above. What it adds is a set of rules the
+editor enforces on the way in:
+
+- **No easing, ever.** An inherit key carries no `curve`, no `curve_mode`, no
+  `curve_driver`, and no `loop_sync`, and the exclusion is *structural* rather
+  than a branch: `InheritKeyframeEdit` has no such member, so
+  `read_key_interpolation` and its siblings return `nullptr` and every easing,
+  curve-preset and loop-synchronization surface refuses an inherit key by name.
+  A stepped lane has no outgoing tangent to ease and no scalar to drive one.
+- **Two keys of one lane can never share a time.** The minimum separation the
+  editor enforces is **1 ms**, the same `kNonEventKeySpacing` every non-event
+  family uses. A retime *clamps* to it against unselected neighbours; a scale
+  *rejects*, naming the lane (`inherit key '<bone>'`) and the separation it
+  would have produced. A paste that lands within 1 µs of an existing key
+  replaces that key in place rather than inserting a second one, and an Add at
+  the playhead does the same — Add and Edit are one operation.
+- **An inherit timeline edit must keep at least one keyframe.** Emptying it does
+  **not** clear the lane. Both serializers skip an empty edit, and
+  `build_runtime_document` assigns into a *copy* of the base document, so an
+  emptied edit silently restores the **imported** track on the next
+  materialization. `remove_inherit_timeline_keys` refuses the last removal and
+  names the remedy.
+- **A lane reduced to one key at time zero whose mode equals the bone's setup
+  `inherit` is pruned by the runtime at load** (`prune_constant_timelines`),
+  exactly as a rotate lane whose only key is a zero angle at the origin is. This
+  is pre-existing, shared with every other family, and deliberately not diverged
+  from. Once pruned the lane cannot be re-created from the dopesheet, because a
+  dopesheet row exists only for a materialized timeline.
+- **A new key's mode is sampled from the effective animation at the playhead**,
+  not from the bone's setup pose, so adding a key in the middle of a stepped
+  lane never changes the pose at that instant.
+
+`.mskl` stays version 1, `.mbin` stays version 2, and `.marrow` gains no key.
 
 ### `mesh_edits`
 
@@ -784,6 +1081,18 @@ Current editor mesh-authoring payload:
 
 This stores per-skin, per-slot, per-attachment mesh weight overrides.
 
+Since MAR-175 every vertex Marrow writes here is canonical: no non-positive
+weight, no repeated bone, at most four influences, sorted by descending weight
+then skeleton order, and summing to one. The schema is unchanged -- the field
+names, shapes, and types are exactly what they were, and the accepted value
+range is narrower than what the loader admits, so every project Marrow can write
+after MAR-175 is one it could already load before it.
+
+MAR-176 adds automatic weight generation (`mesh.generate_weights`) and it writes
+through that same canonicalizer into this same `mesh_edits.weights` shape. No
+field was added, removed, or retyped, and there is no migration and no version
+bump: a generated vertex is a canonical vertex.
+
 ### `constraint_edits`
 
 Current editor constraint-authoring payload:
@@ -792,8 +1101,56 @@ Current editor constraint-authoring payload:
 - `path`
 - `transform`
 - `physics`
+- `operations` (optional, MAR-177)
 
-The export path translates these sections directly into runtime root-level constraint arrays.
+The export path translates the four family sections directly into runtime root-level constraint arrays.
+
+#### `constraint_edits.operations`
+
+The four family sections are **upsert** vectors, and the merge that applies them has exactly two verbs: replace a root-array element whose `name` matches, and append when none does. That vocabulary can say "this constraint now has these values" and "there is one more constraint"; it cannot say "this constraint is now called something else" or "this constraint is gone" — least of all for a constraint that lives in the base `.mskl`, which the project cannot reach by upsert at all.
+
+MAR-177 adds `operations`: an **ordered** array of rename and delete records, applied over the base document **before** the four upsert merges.
+
+```json
+"constraint_edits": {
+  "operations": [
+    { "op": "rename", "family": "transform", "from": "cape_pull", "to": "cape_drag" },
+    { "op": "delete", "family": "ik",        "name": "arm_zero_parent" }
+  ],
+  "ik": [ ... ]
+}
+```
+
+Field rules, enforced on load:
+
+| Field | Rule |
+| --- | --- |
+| `op` | required string, exactly `"rename"` or `"delete"` |
+| `family` | required string, exactly one of `"ik"`, `"path"`, `"transform"`, `"physics"` |
+| `from` | required non-empty string when `op` is `"rename"`; rejected on a delete |
+| `to` | required non-empty string when `op` is `"rename"`, and must differ from `from`; rejected on a delete |
+| `name` | required non-empty string when `op` is `"delete"`; rejected on a rename |
+
+Carrying the *other* op's key is rejected rather than ignored, because a silently ignored key is how a writer's typo becomes a silent no-op.
+
+**The array is ordered, and the order is load-bearing.** A chain (`rename A→B`, then `rename B→C`) names a constraint that only exists after the first record ran; a swap (`A→tmp`, `B→A`, `tmp→B`) passes through a name that is legal only in transit; a reuse (`delete A`, then `rename B→A`) is legal in one order and a duplicate target in the other. A map keyed by source cannot express any of the three.
+
+**Identity is `(family, name)`, never an index.** A delete renumbers everything after it, and the runtime enforces name uniqueness only *within* a family, so an IK constraint and a physics constraint may both be called `arm`; a record naming the wrong family is rejected as a family mismatch, distinctly from a name that does not exist.
+
+**Ownership.** Which representation a lifecycle change takes is determined by where the constraint lives:
+
+| In the base `.mskl`? | In `constraint_edits.<family>`? | Rename | Delete |
+| --- | --- | --- | --- |
+| yes | no | append a record | append a tombstone |
+| yes | yes (an upsert shadowing the base) | append a record **and** rewrite the upsert's `name` | append a tombstone **and** erase the upsert |
+| no | yes (project-only) | rewrite the upsert's `name`; no record | erase the upsert; no record |
+| no | no | rejected: not found | rejected: not found |
+
+The middle row needs both halves: an upsert whose name also exists in the base is *shadowing* it, so erasing only the upsert resurrects the base constraint, and renaming only the upsert leaves the base constraint standing beside the renamed one.
+
+**Materialization** rewrites the root family array *and* every `skins[*].<family>` reference, because skins name constraints and the runtime fails the whole load on an unresolvable one — an unpruned reference makes the exported rig unopenable, not merely wrong. A rename never moves an element and a delete never reorders the survivors, so evaluation order (which is array order) is preserved. When a delete empties a family array, at the root or inside a skin, the **key is erased** rather than left as `[]`: the runtime rejects an empty family array outright (`"<family> constraints must not be empty when provided"`).
+
+The section is **omitted entirely when the record list is empty**, so every project written before MAR-177 serializes byte-identically. It is editor-only: it never enters `.mskl` or `.mbin`, and `.mskl` v1, `.mbin` v2, and C ABI v1 are unchanged.
 
 ### `parameter_model`
 

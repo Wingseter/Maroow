@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -9,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "marrow/editor/selection.hpp"
 #include "marrow/runtime/atlas.hpp"
 #include "marrow/runtime/json.hpp"
 #include "marrow/runtime/skeleton.hpp"
@@ -73,12 +75,38 @@ struct DebugOverlaySettings {
     bool bounding_boxes{false};
 };
 
+/** @brief One editable scalar channel of a persisted timeline key. */
+enum class TimelineScalarComponent : std::uint8_t {
+    Angle,
+    X,
+    Y,
+    Red,
+    Green,
+    Blue,
+    Alpha,
+};
+
+/**
+ * @brief Authored intent for one key's outgoing easing.
+ *
+ * `Manual` is the pre-MAR-171 behaviour and the default for every keyframe and
+ * every project that omits the field: the stored `interpolation` is exactly
+ * what the animator put there. `Auto` records that the stored easing is a
+ * derived value the editor recomputes from the neighbouring keys of the
+ * driver's series. The stored easing remains authoritative for every reader,
+ * including both file formats and the runtime; the mode records only why the
+ * numbers are what they are, and is never exported.
+ */
+enum class TimelineCurveMode : std::uint8_t { Manual, Auto };
+
 struct TransformKeyframeEdit {
     double time{0.0};
     double angle{0.0};
     double x{0.0};
     double y{0.0};
     runtime::Interpolation interpolation{};
+    TimelineCurveMode curve_mode{TimelineCurveMode::Manual};
+    TimelineScalarComponent curve_driver{TimelineScalarComponent::Angle};
 };
 
 struct TransformTimelineEdit {
@@ -86,6 +114,16 @@ struct TransformTimelineEdit {
     std::string bone_name;
     TransformTimelineChannel channel{TransformTimelineChannel::Rotate};
     std::vector<TransformKeyframeEdit> keyframes;
+    /**
+     * @brief Loop-boundary synchronization intent for this timeline.
+     *
+     * When true, the editor maintains one managed key at the animation's
+     * explicit duration whose value and easing mirror this timeline's key at
+     * time zero, so a looping clip wraps without a pop. Absent from every
+     * project that has not opted in, never exported, and default-off for every
+     * newly created timeline.
+     */
+    bool loop_sync{false};
 };
 
 /**
@@ -142,6 +180,16 @@ struct MeshDeformTimelineEdit {
     std::string slot_name;
     std::string attachment_name;
     std::vector<DeformKeyframeEdit> keyframes;
+    /**
+     * @brief Loop-boundary synchronization intent for this timeline.
+     *
+     * When true, the editor maintains one managed key at the animation's
+     * explicit duration whose value and easing mirror this timeline's key at
+     * time zero, so a looping clip wraps without a pop. Absent from every
+     * project that has not opted in, never exported, and default-off for every
+     * newly created timeline.
+     */
+    bool loop_sync{false};
 };
 
 struct MeshWeightInfluenceEdit {
@@ -192,12 +240,24 @@ struct SlotColorKeyframeEdit {
     double time{0.0};
     runtime::SlotColor color{};
     runtime::Interpolation interpolation{};
+    TimelineCurveMode curve_mode{TimelineCurveMode::Manual};
+    TimelineScalarComponent curve_driver{TimelineScalarComponent::Red};
 };
 
 struct SlotColorTimelineEdit {
     std::string animation_name;
     std::string slot_name;
     std::vector<SlotColorKeyframeEdit> keyframes;
+    /**
+     * @brief Loop-boundary synchronization intent for this timeline.
+     *
+     * When true, the editor maintains one managed key at the animation's
+     * explicit duration whose value and easing mirror this timeline's key at
+     * time zero, so a looping clip wraps without a pop. Absent from every
+     * project that has not opted in, never exported, and default-off for every
+     * newly created timeline.
+     */
+    bool loop_sync{false};
 };
 
 struct SlotAttachmentKeyframeEdit {
@@ -209,6 +269,30 @@ struct SlotAttachmentTimelineEdit {
     std::string animation_name;
     std::string slot_name;
     std::vector<SlotAttachmentKeyframeEdit> keyframes;
+};
+
+/**
+ * @brief One stepped bone-inherit key in a project overlay.
+ *
+ * Time is `double` here and `AnimationScalar` (float) in the runtime, the same
+ * narrowing every sibling family already carries.
+ */
+struct InheritKeyframeEdit {
+    double time{0.0};
+    runtime::BoneInherit inherit{runtime::BoneInherit::Normal};
+};
+
+/**
+ * @brief A project-owned bone inherit timeline, keyed by (animation, bone).
+ *
+ * Carries no `loop_sync`: a stepped lane has no boundary easing to mirror, and
+ * only transform, deform and slot color opt into MAR-172's loop sync. Carries
+ * no `curve_mode`/`curve_driver` either -- the discrete families never have.
+ */
+struct BoneInheritTimelineEdit {
+    std::string animation_name;
+    std::string bone_name;
+    std::vector<InheritKeyframeEdit> keyframes;
 };
 
 struct IkConstraintEdit {
@@ -262,6 +346,31 @@ struct PhysicsConstraintEdit {
     runtime::AttachmentVertex gravity{};
     runtime::AttachmentVertex wind{};
     double mix{1.0};
+};
+
+/** @brief Which lifecycle transition an ordered constraint operation records. */
+enum class ConstraintLifecycleKind {
+    Rename,
+    Delete,
+};
+
+/**
+ * @brief One ordered rename or delete applied to a constraint family.
+ *
+ * A constraint's identity is `(family, name)`, never an index: a delete
+ * renumbers every element after it, and the runtime enforces name uniqueness
+ * only within a family, so an IK and a physics constraint may share a name.
+ *
+ * Records are applied front to back over the base skeleton document, and
+ * strictly before any `*_constraint_edits` upsert is merged, so a rename can
+ * never race an upsert for a name. `new_name` is meaningful only for `Rename`
+ * and must be empty for `Delete`.
+ */
+struct ConstraintLifecycleOperation {
+    ConstraintLifecycleKind kind{ConstraintLifecycleKind::Rename};
+    ConstraintKind family{ConstraintKind::Ik};
+    std::string name;      ///< `from` for a rename, the target for a delete.
+    std::string new_name;  ///< `to` for a rename; empty for a delete.
 };
 
 struct AtlasPackSprite {
@@ -463,6 +572,38 @@ struct ParameterModel {
     LipSyncMappingAuthoringDefinition* find_lip_mapping(std::string_view parameter_id);
 };
 
+/// @brief One PSD layer's stable identity and the runtime targets it produced.
+struct PsdLayerProvenance {
+    std::vector<std::string> group_path;  ///< Exact ancestor folder names, outermost first.
+    std::string layer_name;               ///< Exact PSD layer name, before slot de-duplication.
+    std::string slot_name;
+    std::string attachment_name;
+    std::string bone_name;
+    /**
+     * @brief The layer image's file NAME under `layers_directory`. Never a path.
+     *
+     * `write_imported_layers` computes every extracted image as a direct child of
+     * the layer directory, so a stored path could only ever restate that directory
+     * once per layer. Keeping this a bare name holds the story's rebase surface to
+     * TWO fields, which is small enough to enumerate by hand -- and
+     * `rebase_project_paths` is a fixed-length call list that the compiler does not
+     * police. A load-time rejection enforces the invariant rather than trusting it.
+     */
+    std::string image_file;
+};
+
+/// @brief Where a project's art came from, and what each layer became.
+struct PsdImportProvenance {
+    std::filesystem::path source_path;       ///< Project-relative `.psd`.
+    std::filesystem::path layers_directory;  ///< Project-relative extracted-layer directory.
+    std::vector<PsdLayerProvenance> layers;
+};
+
+/// @brief Optional per-format import provenance. Absent in every pre-MAR-188 project.
+struct ProjectImportSources {
+    std::optional<PsdImportProvenance> psd;
+};
+
 struct ProjectMetadata {
     std::string name;
     std::string active_animation;
@@ -471,6 +612,18 @@ struct ProjectMetadata {
     std::string notes;
     ViewportState viewport{};
     TimelineSettings timeline{};
+    /**
+     * @brief MAR-188. `$.editor.import_sources`, absent in every older project.
+     *
+     * `ProjectMetadata` is the correct home: it is what `$.editor` deserialises
+     * into, and `export_directory` -- the other `$.editor` path family -- already
+     * lives here. Note the key already round-tripped verbatim through
+     * `preserved_root` BEFORE this field existed, so a test asserting on
+     * `serialize_project()` text rather than on this struct passes on unmodified
+     * code. `build_project_value` must overwrite the preserved copy, and erase it
+     * when this is disengaged, or an in-memory edit is silently discarded.
+     */
+    std::optional<ProjectImportSources> import_sources;
 };
 
 struct ProjectData {
@@ -480,6 +633,9 @@ struct ProjectData {
     std::optional<ProjectSnapSettings> snap_settings;
     std::vector<AnimationEdit> animation_edits;
     std::vector<TransformTimelineEdit> transform_timeline_edits;
+    // Placed beside the transform edits because both are bone tracks, mirroring
+    // the runtime's own ordering of an animation's per-bone timelines.
+    std::vector<BoneInheritTimelineEdit> bone_inherit_timeline_edits;
     std::vector<MeshDeformTimelineEdit> mesh_deform_timeline_edits;
     std::vector<MeshWeightAttachmentEdit> mesh_weight_attachment_edits;
     std::vector<DrawOrderTimelineEdit> draw_order_timeline_edits;
@@ -490,6 +646,9 @@ struct ProjectData {
     std::vector<PathConstraintEdit> path_constraint_edits;
     std::vector<TransformConstraintEdit> transform_constraint_edits;
     std::vector<PhysicsConstraintEdit> physics_constraint_edits;
+    // Ordered rename/delete records, applied over the base skeleton before the
+    // four upsert vectors above are merged onto it.
+    std::vector<ConstraintLifecycleOperation> constraint_lifecycle_operations;
     std::optional<ParameterModel> parameter_model;
     std::vector<AtlasPackDefinition> atlas_pack_definitions;
     // Unknown top-level additive fields from the loaded `.marrow` document.
@@ -538,6 +697,24 @@ struct ProjectData {
         std::string_view animation_name,
         std::string_view bone_name,
         TransformTimelineChannel channel);
+    /**
+     * @brief Finds a bone inherit timeline edit by animation and bone.
+     * @param animation_name Animation containing the edit.
+     * @param bone_name Bone targeted by the edit.
+     * @return Matching inherit edit, or `nullptr` when none exists.
+     */
+    const BoneInheritTimelineEdit* find_bone_inherit_timeline_edit(
+        std::string_view animation_name,
+        std::string_view bone_name) const;
+    /**
+     * @brief Finds a mutable bone inherit timeline edit by animation and bone.
+     * @param animation_name Animation containing the edit.
+     * @param bone_name Bone targeted by the edit.
+     * @return Matching mutable inherit edit, or `nullptr` when none exists.
+     */
+    BoneInheritTimelineEdit* find_bone_inherit_timeline_edit(
+        std::string_view animation_name,
+        std::string_view bone_name);
     /**
      * @brief Finds a mesh deform timeline edit by animation, slot, and attachment.
      * @param animation_name Animation containing the edit.
@@ -686,12 +863,52 @@ struct ProjectData {
         const std::filesystem::path& atlas_path);
 };
 
+/**
+ * @brief Maps a `.marrow` inherit token onto the runtime mode.
+ * @param key One of `normal`, `onlyTranslation`, `noRotationOrReflection`,
+ *        `noScale`, `noScaleOrReflection`.
+ * @return The matching mode, or `std::nullopt` for an unknown token.
+ *
+ * Declared at namespace scope, unlike `transform_channel_json_key`, because the
+ * merge primitive in `authoring.cpp` validates a caller-supplied token against
+ * the SAME table the parser and both serializers use. A second, one-way copy
+ * living in the authoring layer is exactly the drift this avoids.
+ */
+std::optional<runtime::BoneInherit> inherit_mode_from_key(std::string_view key);
+
+/**
+ * @brief Maps a runtime inherit mode onto its `.marrow` / `.mskl` token.
+ * @param inherit Mode to encode.
+ * @return The token, identical to the runtime parser's vocabulary.
+ */
+std::string_view inherit_mode_json_key(runtime::BoneInherit inherit);
+
 TransformTimelineEdit* ensure_transform_timeline_edit(
     ProjectData& project,
     const runtime::SkeletonData& effective_skeleton,
     std::string_view animation_name,
     std::string_view bone_name,
     TransformTimelineChannel channel);
+
+/**
+ * @brief Returns the project's inherit edit for one bone, materializing it once.
+ *
+ * On first touch the imported track's keys are copied into the project, so a
+ * first edit extends the base timeline rather than replacing it. A bone with no
+ * base track yields an edit with zero keyframes -- the legitimate transient
+ * state of a project-only timeline, which both serializers skip.
+ *
+ * @param project Project receiving the edit.
+ * @param effective_skeleton Skeleton the project currently materializes to.
+ * @param animation_name Animation to edit.
+ * @param bone_name Bone to edit.
+ * @return The edit, or `nullptr` when the animation or bone does not exist.
+ */
+BoneInheritTimelineEdit* ensure_bone_inherit_timeline_edit(
+    ProjectData& project,
+    const runtime::SkeletonData& effective_skeleton,
+    std::string_view animation_name,
+    std::string_view bone_name);
 
 MeshDeformTimelineEdit* ensure_mesh_deform_timeline_edit(
     ProjectData& project,
@@ -735,7 +952,13 @@ double setup_relative_rotation_key(
  * first edit cannot replace the imported track. Keys remain time-sorted and a
  * key within 1e-6 seconds of `time` is updated in place. Inputs are absolute
  * local values; rotate angles are converted to setup-relative runtime keys.
- * Newly inserted keys use linear interpolation.
+ *
+ * `new_key_interpolation` seeds a newly *inserted* key only; an existing key
+ * always keeps the curve it already carries. It defaults to linear, which is
+ * the reproducible contract every Agent operation relies on. The shell passes
+ * the user's remembered default curve here instead, so the preference is read
+ * by the shell and never by this module — the MAR-156 isolation boundary stays
+ * one-directional.
  *
  * @return The inserted or updated keyframe.
  */
@@ -746,7 +969,8 @@ TransformKeyframeEdit& upsert_transform_keyframe(
     std::string_view bone_name,
     TransformTimelineChannel channel,
     double time,
-    const TransformKeyframePatch& patch);
+    const TransformKeyframePatch& patch,
+    runtime::Interpolation new_key_interpolation = runtime::Interpolation::linear());
 
 struct ProjectLoadResult {
     std::shared_ptr<ProjectData> project;
@@ -842,6 +1066,74 @@ struct MinimalProjectOptions {
  */
 ProjectData create_minimal_project(const MinimalProjectOptions& options);
 /**
+ * @brief Relativizes a reference against a project file's directory.
+ *
+ * The house rule, and the same one `rebase_project_paths` uses: the result is
+ * relative when a relative form exists without `../`, and ABSOLUTE otherwise, so
+ * a reference never silently starts pointing outside the project folder.
+ *
+ * Exposed for MAR-188's provenance writer, which has to store project-relative
+ * paths and must not reimplement the rule.
+ *
+ * @param project_path Project file the result is relative to.
+ * @param referenced_path Path being stored.
+ * @return A project-relative path, or an absolute one when no relative form fits.
+ */
+std::filesystem::path project_relative_path(
+    const std::filesystem::path& project_path,
+    const std::filesystem::path& referenced_path);
+
+/**
+ * @brief Rewrites project-relative references so they resolve identically from a
+ *        new project-file location.
+ *
+ * Every path a `.marrow` stores is project-relative by design, and `resolve_path`
+ * resolves it against the project file's own directory. Moving the project file
+ * without rewriting its references therefore changes what they point at, and the
+ * written project stops opening. This is the single place that rewrites them.
+ *
+ * Six families are rebased, and they are exactly the six that are serialized
+ * from struct fields: `runtime_assets.skeleton_path`,
+ * `runtime_assets.atlas_paths`, `editor_metadata.export_directory`, every
+ * `atlas_pack_definitions` entry's `atlas_path` and sprite `image_path`, and
+ * MAR-188's `editor_metadata.import_sources->psd` (`source_path` and
+ * `layers_directory` -- the per-layer `image_file` is a bare file name, not a
+ * path, and is deliberately not a family of its own). Rebasing
+ * only some of them is worse than rebasing none: `find_atlas_pack_definition`
+ * matches an atlas pack to a runtime atlas by RESOLVED path, so a partial rebase
+ * makes the lookup miss and `export_runtime_assets` silently stops packing.
+ *
+ * The rule is identity-preserving: each reference resolves afterwards to the same
+ * absolute file it resolved to before. Empty and absolute references are returned
+ * unchanged. `export_directory` rebases by identity like the rest, so exports
+ * keep landing where they landed; whether a Save As should instead carry exports
+ * along is a UI question owned by MAR-181.
+ *
+ * Relativization goes through `make_project_relative_path`, the house rule, which
+ * returns an ABSOLUTE path whenever the relative form would need `../`. So a Save
+ * As into a sibling or subdirectory turns relative references absolute. The
+ * project opens either way; the result is simply no longer portable as a folder.
+ *
+ * MAR-188 added `$.editor.import_sources.psd` as a real project-relative field
+ * and it IS registered here, as the sixth family.
+ *
+ * Paths stored inside `preserved_root` are still round-tripped opaquely and
+ * cannot be reached from here, and that limitation is permanent rather than
+ * pending: `preserved_root` is by definition whatever this code does not
+ * understand, so a rule quantified over "every relative path" is quantified over
+ * a set the program cannot enumerate. Any path a future document carries under an
+ * unparsed key remains unrebased and silently stale on Save As. Closing that needs
+ * a schema-strict loader or a decision that unparsed paths are unsupported --
+ * neither of which is a change any single story should make on its own.
+ *
+ * @param project Project whose references resolve against its current `source_path`.
+ * @param new_project_path Location the project file is about to be written to.
+ * @return A copy carrying rebased references and `source_path = new_project_path`.
+ */
+ProjectData rebase_project_paths(
+    const ProjectData& project,
+    const std::filesystem::path& new_project_path);
+/**
  * @brief Loads an editor project from an already parsed document.
  * @param document Parsed `.marrow` document.
  * @return Loaded project plus resolved runtime dependencies or an error.
@@ -853,6 +1145,80 @@ ProjectLoadResult load_project(const runtime::json::Document& document);
  * @return Loaded project plus resolved runtime dependencies or an error.
  */
 ProjectLoadResult load_project(const std::filesystem::path& path);
+/** @brief Outcome of a constraint lifecycle primitive. */
+struct ConstraintLifecycleResult {
+    bool ok{false};
+    std::string message;          ///< Empty on success.
+    bool used_operation{false};   ///< True when an ordered record was appended.
+    bool changed_upsert{false};   ///< True when a `*_constraint_edits` entry was rewritten or erased.
+};
+
+/**
+ * @brief Renames a constraint, choosing the representation the ownership rule requires.
+ *
+ * A constraint that lives in the base skeleton cannot be renamed by upsert --
+ * the overlay's only verbs are replace-by-name and append -- so it gets an
+ * ordered record. A project-only constraint is rewritten in place and gets
+ * none. A project upsert that *shadows* a base constraint gets both, because
+ * renaming only the upsert would leave the base constraint standing beside the
+ * renamed one.
+ *
+ * Preflight-then-mutate: on any rejection `*project` is untouched and
+ * `serialize_project()` is byte-identical.
+ *
+ * @param project Project to mutate in place on success.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @param family Constraint family; identity is `(family, name)`, never an index.
+ * @param from Current constraint name.
+ * @param to Requested new name; a collision is refused, never auto-suffixed.
+ * @return The outcome, with which representation was used.
+ */
+ConstraintLifecycleResult rename_constraint(
+    ProjectData* project,
+    const runtime::json::Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view from,
+    std::string_view to);
+
+/**
+ * @brief Deletes a constraint, choosing the representation the ownership rule requires.
+ *
+ * Base-backed constraints get an ordered tombstone; project-only constraints
+ * have their upsert erased; a shadowing upsert needs both, because erasing only
+ * the upsert resurrects the base constraint it was covering.
+ *
+ * Preflight-then-mutate: on any rejection `*project` is untouched and
+ * `serialize_project()` is byte-identical.
+ *
+ * @param project Project to mutate in place on success.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @param family Constraint family; identity is `(family, name)`, never an index.
+ * @param name Constraint to remove.
+ * @return The outcome, with which representation was used.
+ */
+ConstraintLifecycleResult delete_constraint(
+    ProjectData* project,
+    const runtime::json::Document& base_skeleton_document,
+    ConstraintKind family,
+    std::string_view name);
+
+/**
+ * @brief Validates the ordered constraint lifecycle records against a base skeleton.
+ *
+ * Replays the records front to back over the name set the base document
+ * declares, and reports the four causes separately: a source that does not
+ * exist, a rename target already taken inside the same family, a name that
+ * exists in a different family than the record claims, and a source an earlier
+ * record already consumed. Called before either runtime build, so a rejected
+ * project produces an error and writes nothing.
+ *
+ * @param project Project carrying the lifecycle records.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @return A located error describing the first fault, or `std::nullopt`.
+ */
+std::optional<runtime::json::LoadError> validate_constraint_lifecycle_operations(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document);
 /**
  * @brief Builds runtime skeleton data by applying project edits onto a base runtime document.
  * @param project Project containing editor-side overrides.
@@ -869,6 +1235,33 @@ ProjectRuntimeResult build_project_runtime(
  * @return A deep-copied document with animation, timeline, mesh, and constraint edits applied.
  */
 runtime::json::Document build_project_runtime_document(
+    const ProjectData& project,
+    const runtime::json::Document& base_skeleton_document);
+/**
+ * @brief Animation names the project authors, after catalog edits and before overlays.
+ * @param project Project whose `animation_edits` fold is applied.
+ * @param base_skeleton_document Base runtime skeleton document referenced by the project.
+ * @return Sorted, unique animation names the project legitimately declares.
+ *
+ * This is the authority for "does this animation exist", and neither obvious
+ * alternative is correct. The **base document** is wrong because an
+ * `AnimationEdit{Create}` can declare an animation that exists only in the
+ * project. The **materialized `SkeletonData`** is wrong because the overlay
+ * merge calls `ensure_object_member(animations, edit.animation_name)`, which
+ * *creates* the very phantom animations an orphan detector is looking for — a
+ * collector resolving against it reports a clean project, always.
+ *
+ * The authority is the state `build_runtime_document` is in immediately after
+ * `apply_animation_edits` and before the overlay merge. This function lives in
+ * `project.cpp` because `apply_animation_edits` is in that file's anonymous
+ * namespace and cannot be reached from anywhere else; re-deriving the
+ * Create/Rename/Delete/SetDuration/Unknown fold elsewhere would be a second
+ * source of truth that drifts the first time an `AnimationEditKind` is added.
+ *
+ * The whole document root is copied rather than just `animations`, because a
+ * `Rename` also rewrites `mixing` references.
+ */
+std::vector<std::string> authored_animation_names(
     const ProjectData& project,
     const runtime::json::Document& base_skeleton_document);
 /**

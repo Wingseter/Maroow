@@ -23,6 +23,7 @@
 #include "viewport_ffd_controller.hpp"
 #include "viewport_interaction_controller.hpp"
 #include "viewport_interaction_kernel.hpp"
+#include "marrow/editor/authoring.hpp"
 #include "marrow/editor/project.hpp"
 #include "marrow/runtime/module.hpp"
 
@@ -302,7 +303,7 @@ bool rollback_matches(
     const std::optional<ViewportFfdSelection>& ffd_selection) {
     return marrow::editor::serialize_project(*state.session.project()) == project &&
         state.session.runtime_data() == runtime &&
-        preview_signature(*state.preview_skeleton) == preview &&
+        preview_signature(*state.preview_skeleton()) == preview &&
         state.session.dirty() == dirty &&
         state.session.undo_count() == undo_count &&
         state.session.redo_count() == redo_count &&
@@ -462,7 +463,7 @@ bool validate_cross_slot_snap_candidates(
     }
     viewport_ffd::finish_gesture(&state, false);
 
-    state.preview_skeleton->slot_states()[*candidate_slot].color.a = 0.0;
+    state.preview_skeleton()->slot_states()[*candidate_slot].color.a = 0.0;
     if (!activate(*layout) || has_candidate_slot() ||
         !state.viewport_ffd_gesture.has_value() ||
         state.viewport_ffd_gesture->snap_candidates.empty()) {
@@ -471,14 +472,14 @@ bool validate_cross_slot_snap_candidates(
     }
     viewport_ffd::finish_gesture(&state, false);
     if (!std::isfinite(
-            state.preview_skeleton->slot_states()[*candidate_slot].color.a) ||
-        state.preview_skeleton->slot_states()[*candidate_slot].color.a <= 0.0) {
+            state.preview_skeleton()->slot_states()[*candidate_slot].color.a) ||
+        state.preview_skeleton()->slot_states()[*candidate_slot].color.a <= 0.0) {
         std::cerr << "FFD cross-slot alpha probe did not restore preview state.\n";
         return false;
     }
 
     const auto candidate_pose =
-        state.preview_skeleton->evaluate_current_mesh_attachment(*candidate_slot);
+        state.preview_skeleton()->evaluate_current_mesh_attachment(*candidate_slot);
     if (!candidate_pose.has_value() || candidate_pose->vertices.empty()) {
         return false;
     }
@@ -936,7 +937,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     const std::string snap_cancel_project =
         marrow::editor::serialize_project(*state.session.project());
     const auto* snap_cancel_runtime = state.session.runtime_data();
-    const std::string snap_cancel_preview = preview_signature(*state.preview_skeleton);
+    const std::string snap_cancel_preview = preview_signature(*state.preview_skeleton());
     const bool snap_cancel_dirty = state.session.dirty();
     const std::size_t snap_cancel_undo = state.session.undo_count();
     const std::size_t snap_cancel_redo = state.session.redo_count();
@@ -1079,7 +1080,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     const std::string temporary_project =
         marrow::editor::serialize_project(*state.session.project());
     const auto* temporary_runtime = state.session.runtime_data();
-    const std::string temporary_preview = preview_signature(*state.preview_skeleton);
+    const std::string temporary_preview = preview_signature(*state.preview_skeleton());
     const bool temporary_dirty = state.session.dirty();
     const std::size_t temporary_undo = state.session.undo_count();
     const std::size_t temporary_redo = state.session.redo_count();
@@ -1214,8 +1215,8 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         return false;
     }
     const double visible_alpha =
-        state.preview_skeleton->slot_states()[*body_slot].color.a;
-    state.preview_skeleton->slot_states()[*body_slot].color.a = 0.0;
+        state.preview_skeleton()->slot_states()[*body_slot].color.a;
+    state.preview_skeleton()->slot_states()[*body_slot].color.a = 0.0;
     if (!viewport_ffd::begin_gesture(
             &state, *boundary_layout, 0U, *boundary_source) ||
         !viewport_ffd::update_gesture(
@@ -1228,7 +1229,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         return false;
     }
     viewport_ffd::finish_gesture(&state, false);
-    state.preview_skeleton->slot_states()[*body_slot].color.a = visible_alpha;
+    state.preview_skeleton()->slot_states()[*body_slot].color.a = visible_alpha;
 
     if (!viewport_ffd::select_vertex(&state, 0U, false)) {
         return false;
@@ -1432,7 +1433,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         marrow::editor::serialize_project(*state.session.project());
     const bool snap_back_dirty = state.session.dirty();
     const auto* snap_back_runtime = state.session.runtime_data();
-    const std::string snap_back_preview = preview_signature(*state.preview_skeleton);
+    const std::string snap_back_preview = preview_signature(*state.preview_skeleton());
     if (!viewport_ffd::begin_gesture(
             &state, *snap_back_layout, 0U, *snap_back_source) ||
         !viewport_ffd::update_gesture(
@@ -1452,7 +1453,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         state.session.dirty() != snap_back_dirty ||
         state.session.undo_count() != 0U ||
         state.session.runtime_data() != snap_back_runtime ||
-        preview_signature(*state.preview_skeleton) != snap_back_preview) {
+        preview_signature(*state.preview_skeleton()) != snap_back_preview) {
         std::cerr << "FFD enabled snap return-to-start left state or history.\n";
         return false;
     }
@@ -1472,7 +1473,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     const std::string rollback_project =
         marrow::editor::serialize_project(*state.session.project());
     const auto* rollback_runtime = state.session.runtime_data();
-    const std::string rollback_preview = preview_signature(*state.preview_skeleton);
+    const std::string rollback_preview = preview_signature(*state.preview_skeleton());
     const bool rollback_dirty = state.session.dirty();
     const std::size_t rollback_undo = state.session.undo_count();
     const std::size_t rollback_redo = state.session.redo_count();
@@ -1608,12 +1609,12 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         current_body_mesh->mesh_geometry->weights.size() < 2U) {
         return false;
     }
-    const auto pose_before_singular = state.preview_skeleton->bone_poses();
-    state.preview_skeleton->bone_poses()[*spine_index].local_pose.scale_x = 0.0;
-    state.preview_skeleton->bone_poses()[*arm_index].inherit =
+    const auto pose_before_singular = state.preview_skeleton()->bone_poses();
+    state.preview_skeleton()->bone_poses()[*spine_index].local_pose.scale_x = 0.0;
+    state.preview_skeleton()->bone_poses()[*arm_index].inherit =
         marrow::runtime::BoneInherit::NoScale;
-    state.preview_skeleton->update_world_transforms();
-    const auto singular_world = state.preview_skeleton->bone_world_transforms();
+    state.preview_skeleton()->update_world_transforms();
+    const auto singular_world = state.preview_skeleton()->bone_world_transforms();
     const auto inverse_for_smoke_vertex = [&](std::size_t vertex_index) {
         std::vector<marrow::editor::viewport_interaction_kernel::FfdInfluence>
             influences;
@@ -1660,8 +1661,8 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         std::cerr << "FFD mixed-solvability group mutated before atomic rejection.\n";
         return false;
     }
-    state.preview_skeleton->bone_poses() = pose_before_singular;
-    state.preview_skeleton->update_world_transforms();
+    state.preview_skeleton()->bone_poses() = pose_before_singular;
+    state.preview_skeleton()->update_world_transforms();
 
     const auto persistent_selection = state.viewport_ffd_selection;
     if (!scrub_timeline_time(
@@ -1716,7 +1717,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         !linked_vertex.has_value() || !linked_snap_target.has_value() ||
         linked_overlay->display_attachment_name != "warrior_body" ||
         linked_overlay->deform_attachment_name != "body_mesh" ||
-        state.preview_skeleton->current_mesh_vertex_offsets(*body_slot) == nullptr ||
+        state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot) == nullptr ||
         !viewport_ffd::select_vertex(&state, 0U, false) ||
         !viewport_ffd::select_vertex(&state, 1U, true) ||
         !viewport_ffd::begin_gesture(
@@ -1930,7 +1931,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
     const auto override_selection = override_state.viewport_ffd_selection;
     const auto* override_runtime = override_state.session.runtime_data();
     const std::string override_preview_signature =
-        preview_signature(*override_state.preview_skeleton);
+        preview_signature(*override_state.preview_skeleton());
     const bool override_dirty = override_state.session.dirty();
     if (!override_layout.has_value() || !override_vertex.has_value() ||
         !viewport_ffd::begin_gesture(
@@ -1944,7 +1945,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         marrow::editor::serialize_project(*override_state.session.project()) !=
             override_project ||
         override_state.session.runtime_data() != override_runtime ||
-        preview_signature(*override_state.preview_skeleton) !=
+        preview_signature(*override_state.preview_skeleton()) !=
             override_preview_signature ||
         override_state.session.dirty() != override_dirty ||
         override_state.session.undo_count() != 0U ||
@@ -2021,7 +2022,7 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
               *face_slot, "face_mesh", kFfdSmokeTime)
         : std::nullopt;
     const auto* final_offsets_pointer =
-        parameter_state.preview_skeleton->current_final_mesh_vertex_offsets(
+        parameter_state.preview_skeleton()->current_final_mesh_vertex_offsets(
             *face_slot);
     const auto* parameter_attachment =
         parameter_state.session.runtime_data()->find_attachment(
@@ -2082,6 +2083,72 @@ bool validate_viewport_ffd_smoke(const std::filesystem::path& project_path) {
         !ffd_selection_is(parameter_state, {0U, 1U})) {
         std::cerr << "FFD parameter-composed group did not stay animation-only.\n";
         return false;
+    }
+
+    // --- MAR-170: a live FFD vertex drag authors a new Deform key, so it is a
+    // key-creation path and must take the remembered default curve. A seed
+    // initializes a newly inserted key and never rewrites an existing one. ---
+    {
+        ShellState seed_state;
+        seed_state.project_path = project_path;
+        // The enclosing run_headless_smoke() already redirects
+        // MARROW_CONFIG_HOME, and this case sets the preference in memory, so
+        // no settings file is read or written here.
+        seed_state.preferences.default_curve = marrow::editor::CurvePreset::EaseOut;
+        constexpr double kSeedTime = 0.62;
+        if (!reload_project(&seed_state)) {
+            std::cerr << "FFD default-curve smoke could not load its project.\n";
+            return false;
+        }
+        const auto seed_body_slot =
+            seed_state.session.runtime_data()->find_slot_index("body");
+        const auto seed_mesh_skin =
+            seed_state.session.runtime_data()->find_skin_index("mesh_base");
+        if (!seed_body_slot.has_value() || !seed_mesh_skin.has_value() ||
+            !prepare_attachment(
+                &seed_state, *seed_body_slot, *seed_mesh_skin, "body_mesh",
+                kSeedTime)) {
+            std::cerr << "FFD default-curve smoke could not stage body_mesh.\n";
+            return false;
+        }
+        const auto seed_layout = smoke_layout(seed_state);
+        const auto seed_vertex =
+            seed_layout.has_value()
+            ? vertex_screen_position(seed_state, *seed_layout, 0U)
+            : std::nullopt;
+        if (!seed_layout.has_value() || !seed_vertex.has_value() ||
+            !viewport_ffd::select_vertex(&seed_state, 0U, false) ||
+            !viewport_ffd::begin_gesture(
+                &seed_state, *seed_layout, 0U, *seed_vertex) ||
+            !viewport_ffd::update_gesture(
+                &seed_state,
+                *seed_layout,
+                ImVec2(seed_vertex->x + 14.0f, seed_vertex->y - 9.0f))) {
+            std::cerr << "FFD default-curve smoke could not drive a vertex drag: "
+                      << seed_state.error_message << '\n';
+            return false;
+        }
+        viewport_ffd::finish_gesture(&seed_state, true);
+        const auto* seed_edit =
+            seed_state.session.project()->find_mesh_deform_timeline_edit(
+                "idle", "body", "body_mesh");
+        const auto* seed_key = key_near(seed_edit, kSeedTime);
+        if (seed_key == nullptr ||
+            marrow::editor::curve_preset_of(seed_key->interpolation) !=
+                std::optional<marrow::editor::CurvePreset>(
+                    marrow::editor::CurvePreset::EaseOut)) {
+            std::cerr << "A Deform key authored by an FFD vertex drag did not take the "
+                         "remembered default curve.\n";
+            return false;
+        }
+        // The fixture's own keys keep the curves they were imported with.
+        const auto* untouched_key = key_near(seed_edit, 1.0);
+        if (untouched_key == nullptr ||
+            untouched_key->interpolation.kind() !=
+                marrow::runtime::InterpolationKind::Stepped) {
+            std::cerr << "Seeding a new Deform key rewrote an existing key's curve.\n";
+            return false;
+        }
     }
 
     std::cout

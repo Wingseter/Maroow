@@ -15,6 +15,190 @@ def _interpolation_schema() -> dict:
     }
 
 
+def _bezier_interpolation_schema() -> dict:
+    """Easing request schema for ``timeline.set_interpolation``.
+
+    The tuple form expresses the x constraint the C++ primitive enforces:
+    ``cx1``/``cx2`` must stay in ``[0, 1]`` because that is exactly what makes
+    the runtime's ``X(t) = alpha`` inverse well posed and what both file
+    loaders already require. ``cy1``/``cy2`` are unbounded so finite overshoot
+    stays authorable. The schema is advisory - the server forwards every call
+    verbatim and the C++ primitive remains the sole authority.
+
+    The string form names one of the six fixed MAR-170 curve presets, spelled
+    snake_case only: ``linear``, ``stepped``, ``ease`` ``[0.25, 0.1, 0.25, 1]``,
+    ``ease_in`` ``[0.42, 0, 1, 1]``, ``ease_out`` ``[0, 0, 0.58, 1]``, and
+    ``ease_in_out`` ``[0.42, 0, 0.58, 1]``. None of them overshoots.
+    """
+    return {
+        "oneOf": [
+            {
+                "type": "string",
+                "enum": [
+                    "linear",
+                    "stepped",
+                    "ease",
+                    "ease_in",
+                    "ease_out",
+                    "ease_in_out",
+                ],
+                "description": (
+                    "One of the six fixed curve presets: linear, stepped, "
+                    "ease [0.25, 0.1, 0.25, 1], ease_in [0.42, 0, 1, 1], "
+                    "ease_out [0, 0, 0.58, 1], ease_in_out [0.42, 0, 0.58, 1]."
+                ),
+            },
+            {
+                "type": "array",
+                "items": [
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {"type": "number"},
+                    {"type": "number", "minimum": 0, "maximum": 1},
+                    {"type": "number"},
+                ],
+                "minItems": 4,
+                "maxItems": 4,
+            },
+        ]
+    }
+
+
+def _timeline_curve_mode_key_schema() -> dict:
+    """Only the two families that carry both an easing and a scalar series.
+
+    Deliberately not a reuse of ``_timeline_interpolation_key_schema()``, which
+    also admits ``deform``: a deform key's value is a vertex-offset vector with
+    no canonical scalar to drive a tangent, so it has no automatic curve mode.
+    """
+    common = {
+        "animation": {"type": "string", "minLength": 1},
+        "time": {"type": "number", "minimum": 0},
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "time"],
+            },
+        ]
+    }
+
+
+def _timeline_loop_sync_lane_schema() -> dict:
+    """The three continuous families, named as whole lanes rather than keys.
+
+    Deliberately not a reuse of ``_timeline_interpolation_key_schema()``, whose
+    entries require a ``time``: loop synchronization is a property of a whole
+    timeline, and its identity is exactly the part no retime, insertion,
+    deletion, or paste can change. Draw-order, event, and slot-attachment lanes
+    are piecewise constant and are absent on purpose.
+    """
+    common = {"animation": {"type": "string", "minLength": 1}}
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "deform"},
+                    "slot": {"type": "string", "minLength": 1},
+                    "attachment": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "attachment"],
+            },
+        ]
+    }
+
+
+def _timeline_interpolation_key_schema() -> dict:
+    """Only the three families whose keys carry an ``interpolation`` field.
+
+    Deliberately not a reuse of ``_timeline_retime_key_schema()``, which also
+    admits ``draw_order``, ``event``, and ``slot_attachment`` keys - those
+    structs have no easing at all.
+    """
+    common = {
+        "animation": {"type": "string", "minLength": 1},
+        "time": {"type": "number", "minimum": 0},
+    }
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "transform"},
+                    "bone": {"type": "string", "minLength": 1},
+                    "channel": {
+                        "type": "string",
+                        "enum": ["rotate", "translate", "scale", "shear"],
+                    },
+                },
+                "required": ["kind", "animation", "bone", "channel", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "deform"},
+                    "slot": {"type": "string", "minLength": 1},
+                    "attachment": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "attachment", "time"],
+            },
+            {
+                "type": "object",
+                "properties": {
+                    **common,
+                    "kind": {"type": "string", "const": "slot_color"},
+                    "slot": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "animation", "slot", "time"],
+            },
+        ]
+    }
+
+
 def _color_schema() -> dict:
     return {
         "type": "object",
@@ -457,6 +641,133 @@ def get_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
+            name="timeline.set_interpolation",
+            description=(
+                "Replace the outgoing easing of timeline keys. The easing is shared by "
+                "every component of a key, so this never creates per-component curves. "
+                "Bezier x control points must stay in [0, 1]; finite y overshoot is "
+                "allowed. A dry run reports each key's current curve without mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_interpolation_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "interpolation": _bezier_interpolation_schema(),
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["keys", "interpolation"],
+            },
+        ),
+        types.Tool(
+            name="timeline.set_curve_mode",
+            description=(
+                "Record manual or automatic curve intent on transform and slot-colour "
+                "timeline keys. An automatic key's easing is recomputed from the "
+                "driver's neighbouring keys whenever they move, and never overshoots "
+                "its segment endpoints; dragging a handle, applying a preset, or "
+                "writing an absolute easing switches that segment back to manual. "
+                "`driver` names which scalar series drives the computation and is "
+                "rejected with `manual`; omitted, it is the family's lowest-indexed "
+                "component. Deform keys have no automatic mode. A dry run reports each "
+                "key's current mode, driver, and curve without mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_curve_mode_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "mode": {"type": "string", "enum": ["manual", "auto"]},
+                    "driver": {
+                        "type": "string",
+                        "enum": ["angle", "x", "y", "r", "g", "b", "a"],
+                    },
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["keys", "mode"],
+            },
+        ),
+        types.Tool(
+            name="timeline.set_loop_sync",
+            description=(
+                "Enable or disable loop-boundary synchronization on whole transform, "
+                "slot-colour, and deform timelines. An opted-in lane always carries "
+                "exactly one managed key at the animation's explicit duration whose "
+                "value and easing mirror that lane's key at time zero, so a looping "
+                "clip wraps without a pop, and the editor re-establishes that on every "
+                "edit. Enabling requires an explicit clip duration of at least one "
+                "millisecond and a key exactly at time zero, and creates or adopts the "
+                "managed key immediately. Disabling evaluates no prerequisite and "
+                "leaves the managed key in place as an ordinary key. Draw-order, "
+                "event, and slot-attachment lanes are piecewise constant and are not "
+                "supported. Lane entries carry no `time`. A dry run reports each "
+                "lane's current flag and boundary key, and the resulting one, without "
+                "mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "lanes": {
+                        "type": "array",
+                        "items": _timeline_loop_sync_lane_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "enabled": {"type": "boolean"},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["lanes", "enabled"],
+            },
+        ),
+        types.Tool(
+            name="timeline.scale_key_times",
+            description=(
+                "Scale the times of a timeline key selection about one edge of its own "
+                "range. `pivot` names which edge stays fixed -- \"start\" pins the "
+                "earliest selected time and moves the late edge, \"end\" pins the "
+                "latest and moves the early edge -- and every selected key lands at "
+                "pivot + (time - pivot) * scale, so the pivot key never moves. Only "
+                "finite, strictly positive ratios are accepted; there is no time "
+                "reversal. Unlike timeline.retime_keyframes, which clamps, a collision "
+                "REJECTS the whole call: any projected pair that would fall closer than "
+                "the family's one-millisecond minimum -- including a selected key "
+                "intruding on an unselected neighbour -- leaves the project untouched. "
+                "Event keys sharing a time move together, and a selection naming only "
+                "part of such a tie is rejected by name. Every key must belong to one "
+                "animation, and a key pinned by loop synchronization rejects. `snap` "
+                "defaults to FALSE here because a scripted ratio is exact; when true it "
+                "reshapes the ratio so the MOVED EDGE ONLY lands on a frame boundary, "
+                "leaving interior keys where the ratio puts them. A dry run reports the "
+                "pivot, both spans, and each key's previous and resulting time without "
+                "mutating."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "keys": {
+                        "type": "array",
+                        "items": _timeline_retime_key_schema(),
+                        "minItems": 1,
+                        "maxItems": 4096,
+                    },
+                    "scale": {"type": "number", "exclusiveMinimum": 0},
+                    "pivot": {"type": "string", "enum": ["start", "end"]},
+                    "snap": {"type": "boolean"},
+                    "frames_per_second": {"type": "number", "exclusiveMinimum": 0},
+                    "dry_run": {"type": "boolean"},
+                },
+                "required": ["keys", "scale", "pivot"],
+            },
+        ),
+        types.Tool(
             name="save",
             description="Request editor approval to save the project",
             inputSchema={"type": "object", "properties": {}}
@@ -551,7 +862,14 @@ def get_tools() -> list[types.Tool]:
                     "target": {"type": ["string", "null"]},
                     "mix": {"type": ["number", "null"]},
                     "bend_positive": {"type": ["boolean", "null"]},
+                    "softness": {"type": ["number", "null"]},
+                    "compress": {"type": ["boolean", "null"]},
+                    "stretch": {"type": ["boolean", "null"]},
                     "bone_names": {"type": "array", "items": {"type": "string"}},
+                    # The C++ handler has always read bool_arg(args, "merge"),
+                    # and the path/transform/physics schemas below all declare
+                    # it -- only this one never did.
+                    "merge": {"type": "boolean"},
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["name"]
@@ -637,6 +955,41 @@ def get_tools() -> list[types.Tool]:
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["name"]
+            }
+        ),
+        types.Tool(
+            name="constraint.rename",
+            description="Rename one constraint and cascade its skin references.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "family": {
+                        "type": "string",
+                        "enum": ["ik", "path", "transform", "physics"]
+                    },
+                    "from": {"type": "string", "minLength": 1},
+                    "to": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["family", "from", "to"],
+                "additionalProperties": False
+            }
+        ),
+        types.Tool(
+            name="constraint.delete",
+            description="Delete one constraint and prune it from every skin that names it.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "family": {
+                        "type": "string",
+                        "enum": ["ik", "path", "transform", "physics"]
+                    },
+                    "name": {"type": "string", "minLength": 1},
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["family", "name"],
+                "additionalProperties": False
             }
         ),
         types.Tool(
@@ -732,7 +1085,14 @@ def get_tools() -> list[types.Tool]:
                             "required": ["index", "influences"]
                         }
                     },
-                    "normalize": {"type": "boolean"},
+                    "normalize": {
+                        "type": "boolean",
+                        "description": (
+                            "Deprecated. Weight writes are always canonicalized, so "
+                            "true and omission behave as before and an explicit false "
+                            "is rejected with invalid_request."
+                        )
+                    },
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["skin", "slot", "attachment", "vertices"]
@@ -740,16 +1100,80 @@ def get_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="normalize_weights",
-            description="Normalize all weighted-mesh influences for an attachment.",
+            description=(
+                "Canonicalize weighted-mesh influences for an attachment: drop "
+                "non-positive weights, merge duplicate bones, sort by descending "
+                "weight then skeleton order, cap at four, and normalize the sum."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "skin": {"type": "string"},
                     "slot": {"type": "string"},
                     "attachment": {"type": "string"},
+                    "vertices": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "description": "Vertex indices to normalize. Absent means every vertex."
+                    },
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["skin", "slot", "attachment"]
+            }
+        ),
+        types.Tool(
+            name="mesh.rebind_weights",
+            description=(
+                "Re-express weighted-mesh bind offsets in each bone's setup frame "
+                "without changing which bones influence a vertex, any weight, or "
+                "mesh topology."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skin": {"type": "string"},
+                    "slot": {"type": "string"},
+                    "attachment": {"type": "string"},
+                    "vertices": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "description": "Vertex indices to rebind. Absent means every vertex."
+                    },
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["skin", "slot", "attachment"]
+            }
+        ),
+        types.Tool(
+            name="mesh.generate_weights",
+            description=(
+                "Generate deterministic top-four weights for a weighted mesh from an "
+                "explicit candidate-bone list, using inverse-square distance to each "
+                "candidate's setup-pose bone segment."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skin": {"type": "string"},
+                    "slot": {"type": "string"},
+                    "attachment": {"type": "string"},
+                    "bones": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": (
+                            "Candidate bone names. Required; never expanded to the whole "
+                            "skeleton."
+                        )
+                    },
+                    "vertices": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 0},
+                        "description": "Vertex indices to regenerate. Absent means every vertex."
+                    },
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["skin", "slot", "attachment", "bones"]
             }
         ),
         types.Tool(
@@ -810,6 +1234,43 @@ def get_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="set_inherit_keyframe",
+            description="Create or replace a stepped bone inherit keyframe.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string"},
+                    "bone": {"type": "string"},
+                    "time": {"type": "number"},
+                    "inherit": {
+                        "type": "string",
+                        "enum": [
+                            "normal",
+                            "onlyTranslation",
+                            "noRotationOrReflection",
+                            "noScale",
+                            "noScaleOrReflection"
+                        ]
+                    },
+                    "dry_run": {"type": "boolean"}
+                },
+                "required": ["animation", "bone", "time", "inherit"]
+            }
+        ),
+        types.Tool(
+            name="remove_inherit_keyframe",
+            description="Remove a stepped bone inherit keyframe by exact time.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "animation": {"type": "string"},
+                    "bone": {"type": "string"},
+                    "time": {"type": "number"}
+                },
+                "required": ["animation", "bone", "time"]
+            }
+        ),
+        types.Tool(
             name="import.spine_json",
             description="Validate or queue a reviewed Spine JSON import.",
             inputSchema={
@@ -839,7 +1300,14 @@ def get_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="import.psd_layers",
-            description="Validate or queue a reviewed PSD layer import.",
+            description=(
+                "Plan or queue a reviewed PSD reimport of the project's own bundle. "
+                "Returns scene_delta.plan with the ordered layer rows and the "
+                "added/updated/missing counts. 'output' and 'atlas_output' are "
+                "optional and must name the project's own skeleton and atlas; any "
+                "other path is refused with not_project_bundle. Approval is "
+                "editor-only, following agent.resume's precedent."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -847,6 +1315,7 @@ def get_tools() -> list[types.Tool]:
                     "output": {"type": "string"},
                     "skeleton_output": {"type": "string"},
                     "atlas_output": {"type": "string"},
+                    "staging_root": {"type": "string"},
                     "dry_run": {"type": "boolean"}
                 },
                 "required": ["input"]

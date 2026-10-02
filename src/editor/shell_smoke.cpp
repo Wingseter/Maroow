@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -23,6 +24,7 @@
 #include "shell_coalesced_edit.hpp"
 #include "shell_derived_cache.hpp"
 #include "shell_inspector.hpp"
+#include "shell_preferences.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
 #include "shell_smoke_scenarios.hpp"
@@ -44,6 +46,12 @@
 namespace marrow::editor::shell {
 
 int run_headless_smoke(const Options& options) {
+    // MAR-170: FIRST statement. Every path below constructs a ShellState and
+    // loads user-local editor settings, so the real `editor-settings.json` must
+    // be out of reach before anything can read or write it. Destruction on
+    // every return path restores the previous value and removes the directory.
+    const ScopedPreferenceIsolation preference_isolation("smoke");
+
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
 
@@ -61,7 +69,19 @@ int run_headless_smoke(const Options& options) {
     int font_height = 0;
     io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
 
+    // Focused coordinator contracts use this host's real ImGui setup and
+    // preference isolation, but never run in the product executable.
+    const char* frame_contract_only = std::getenv("MARROW_FRAME_CONTRACT_ONLY");
+    if (frame_contract_only != nullptr && std::string(frame_contract_only) == "1") {
+        const bool passed = validate_shared_shell_frame_contract(io);
+        ImGui::DestroyContext();
+        return passed ? 0 : 1;
+    }
+
     ShellState shell_state;
+    // Inside the isolation installed above, so this reads the temporary config
+    // home and never the developer's real editor-settings.json.
+    load_shell_preferences(&shell_state);
     shell_state.project_path = options.project_path;
     if (!reload_project(&shell_state)) {
         std::cerr << shell_state.error_message;
@@ -87,11 +107,65 @@ int run_headless_smoke(const Options& options) {
         return 1;
     }
 
+    if (!validate_timeline_graph_edit_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!validate_timeline_graph_easing_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!validate_timeline_curve_preset_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!validate_timeline_curve_mode_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
+    if (!validate_timeline_loop_sync_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_timeline_scale_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_preview_playback_speed_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_inherit_editing_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_constraint_lifecycle_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_constraint_parameter_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_mar187_problems_shell_smoke(options.project_path)) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+    if (!validate_mar190_psd_reimport_shell_smoke()) {
+        ImGui::DestroyContext();
+        return 1;
+    }
+
     const bool passed =
         validate_shell_foundation_smoke(shell_state, options) &&
         validate_viewport_selection_smoke(shell_state) &&
         validate_timeline_project_smoke(shell_state) &&
-        render_headless_smoke_frames(shell_state, options, io);
+        render_headless_smoke_frames(shell_state, options, io) &&
+        validate_mar181_frame_body_applied_pending(shell_state);
 
     ImGui::DestroyContext();
     return passed ? 0 : 1;

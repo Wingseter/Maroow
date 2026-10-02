@@ -1,5 +1,7 @@
 #include "agent_dispatch_internal.hpp"
-#include "shell_constraints.hpp"
+#include "constraint_lookup.hpp"
+
+#include "marrow/editor/constraint_catalog.hpp"
 
 #include <algorithm>
 #include <set>
@@ -213,7 +215,7 @@ struct PathConstraintTraits {
     static const RuntimeConstraint* find_runtime(
         const marrow::runtime::SkeletonData& skeleton,
         std::string_view name) {
-        return shell::find_named_constraint(skeleton.path_constraints(), name);
+        return find_named_constraint(skeleton.path_constraints(), name);
     }
     static Edit materialize(
         const marrow::runtime::SkeletonData& skeleton,
@@ -355,7 +357,7 @@ struct TransformConstraintTraits {
     static const RuntimeConstraint* find_runtime(
         const marrow::runtime::SkeletonData& skeleton,
         std::string_view name) {
-        return shell::find_named_constraint(skeleton.transform_constraints(), name);
+        return find_named_constraint(skeleton.transform_constraints(), name);
     }
     static Edit materialize(
         const marrow::runtime::SkeletonData& skeleton,
@@ -488,7 +490,7 @@ struct PhysicsConstraintTraits {
     static const RuntimeConstraint* find_runtime(
         const marrow::runtime::SkeletonData& skeleton,
         std::string_view name) {
-        return shell::find_named_constraint(skeleton.physics_constraints(), name);
+        return find_named_constraint(skeleton.physics_constraints(), name);
     }
     static Edit materialize(
         const marrow::runtime::SkeletonData& skeleton,
@@ -659,6 +661,31 @@ AgentDispatchResult handle_constraint_edit(
         std::move(live_delta));
 }
 
+/**
+ * @brief The `edit_ik_constraint` scene_delta, mirroring the traits previews.
+ *
+ * MAR-179. `edit_ik_constraint` is deliberately NOT a
+ * `handle_constraint_edit<IkConstraintTraits>` specialization: the template's
+ * `merge` calls `validate_bone_names` and returns a pre-transaction error,
+ * which would delete the suite's only constraint commit-time rollback case
+ * (`agent_dispatch_smoke.cpp`, "edit_ik_constraint invalid target rollback").
+ * The handler keeps its hand-written body and borrows only the shape, so this
+ * helper exists to give it the same nine-key payload on both branches.
+ */
+json::Value ik_constraint_preview(const IkConstraintEdit& edit, bool dry_run) {
+    json::Value::Object object;
+    object.emplace("dry_run", bool_value(dry_run));
+    object.emplace("name", string_value(edit.name));
+    object.emplace("bones", string_array_value(edit.bone_names));
+    object.emplace("target", string_value(edit.target_bone_name));
+    object.emplace("mix", number_value(edit.mix));
+    object.emplace("bend_positive", bool_value(edit.bend_positive));
+    object.emplace("softness", number_value(edit.softness));
+    object.emplace("compress", bool_value(edit.compress));
+    object.emplace("stretch", bool_value(edit.stretch));
+    return object_value(std::move(object));
+}
+
 } // namespace
 
 AgentDispatchResult handle_constraint_operation(
@@ -682,32 +709,115 @@ AgentDispatchResult handle_constraint_operation(
             return make_error("edit_ik_constraint requires 'name' string.", op, spec);
         }
 
-        if (bool_arg(args, "dry_run")) {
-            const IkConstraintEdit* project_edit = project.find_ik_constraint_edit(*name);
+        // MAR-179: merge first, THEN branch on dry_run, so both branches report
+        // the same nine-key payload. Before this the dry run short-circuited
+        // here and echoed three keys, and the live path returned no scene_delta
+        // at all -- the only one of the four families without a live delta.
+        IkConstraintEdit merged;
+        if (const IkConstraintEdit* project_edit =
+                project.find_ik_constraint_edit(*name)) {
+            merged = *project_edit;
+        } else if (
             const marrow::runtime::IkConstraintData* runtime_constraint =
-                shell::find_named_constraint(skeleton.ik_constraints(), *name);
-            if (project_edit == nullptr && runtime_constraint == nullptr) {
-                return make_error(
-                    "IK constraint not found in runtime skeleton.",
-                    op,
-                    spec,
-                    "not_found");
+                find_named_constraint(skeleton.ik_constraints(), *name)) {
+            merged.name = std::string(*name);
+            merged.bone_names =
+                names_from_indices(skeleton.bones(), runtime_constraint->bone_indices);
+            if (runtime_constraint->target_bone_index < skeleton.bones().size()) {
+                merged.target_bone_name =
+                    skeleton.bones()[runtime_constraint->target_bone_index].name;
             }
-            json::Value::Object preview;
-            preview.emplace("dry_run", bool_value(true));
-            preview.emplace("name", string_value(std::string(*name)));
-            if (const auto mix = number_arg(*args, "mix")) {
-                preview.emplace("mix", number_value(*mix));
-            } else if (project_edit != nullptr) {
-                preview.emplace("mix", number_value(project_edit->mix));
-            } else {
-                preview.emplace("mix", number_value(runtime_constraint->mix));
+            merged.mix = runtime_constraint->mix;
+            merged.bend_positive = runtime_constraint->bend_positive;
+            merged.softness = runtime_constraint->softness;
+            merged.compress = runtime_constraint->compress;
+            merged.stretch = runtime_constraint->stretch;
+        } else {
+            return make_error(
+                "IK constraint not found in runtime skeleton.",
+                op,
+                spec,
+                "not_found");
+        }
+
+        if (const json::Value* target_val = json::find_member(*args, "target")) {
+            if (target_val->is_string()) {
+                merged.target_bone_name = target_val->as_string();
+            } else if (!target_val->is_null()) {
+                return make_error("target must be string or null.", op, spec);
             }
+        }
+
+        if (const json::Value* bones_val = json::find_member(*args, "bone_names")) {
+            if (!bones_val->is_array()) {
+                return make_error("bone_names must be an array of strings.", op, spec);
+            }
+            merged.bone_names.clear();
+            for (const auto& bone : bones_val->as_array()) {
+                if (!bone.is_string()) {
+                    return make_error("bone_names must be an array of strings.", op, spec);
+                }
+                merged.bone_names.push_back(bone.as_string());
+            }
+        }
+
+        if (const json::Value* mix_val = json::find_member(*args, "mix")) {
+            if (mix_val->is_number()) {
+                merged.mix = mix_val->as_number();
+            } else if (!mix_val->is_null()) {
+                return make_error("mix must be number or null.", op, spec);
+            }
+        }
+
+        if (const json::Value* bend_val = json::find_member(*args, "bend_positive")) {
+            if (bend_val->is_boolean()) {
+                merged.bend_positive = bend_val->as_boolean();
+            } else if (!bend_val->is_null()) {
+                return make_error("bend_positive must be bool or null.", op, spec);
+            }
+        }
+
+        if (const json::Value* softness_val = json::find_member(*args, "softness")) {
+            if (softness_val->is_number()) {
+                merged.softness = softness_val->as_number();
+            } else if (!softness_val->is_null()) {
+                return make_error("softness must be number or null.", op, spec);
+            }
+        }
+
+        if (const json::Value* compress_val = json::find_member(*args, "compress")) {
+            if (compress_val->is_boolean()) {
+                merged.compress = compress_val->as_boolean();
+            } else if (!compress_val->is_null()) {
+                return make_error("compress must be bool or null.", op, spec);
+            }
+        }
+
+        if (const json::Value* stretch_val = json::find_member(*args, "stretch")) {
+            if (stretch_val->is_boolean()) {
+                merged.stretch = stretch_val->as_boolean();
+            } else if (!stretch_val->is_null()) {
+                return make_error("stretch must be bool or null.", op, spec);
+            }
+        }
+
+        // A SURFACE guard only. The runtime clamps a negative softness to zero
+        // and none of the three loader layers reject it, so authoring one is
+        // always a mistake -- but tightening `project.cpp` would make an
+        // existing `.marrow` carrying a negative value unopenable. `mix` is
+        // deliberately left to commit-time L1, which is what keeps the
+        // "Failed to apply IK constraint edit: " rollback case reachable.
+        if (merged.softness < 0.0) {
+            return make_error(
+                "ik constraint softness must be non-negative.", op, spec);
+        }
+
+        if (bool_arg(args, "dry_run")) {
             return make_success(
                 "IK constraint edit validated.",
                 op,
                 spec,
-                object_value(std::move(preview)));
+                ik_constraint_preview(merged, true));
         }
 
         auto transaction = session.begin_edit({
@@ -719,72 +829,14 @@ AgentDispatchResult handle_constraint_operation(
         if (!transaction) {
             return make_error(transaction.error()->format(), op, spec, "transaction_active");
         }
+
+        json::Value live_delta = ik_constraint_preview(merged, false);
         ProjectData& editable_project = *transaction.project();
-        IkConstraintEdit* edit = editable_project.find_ik_constraint_edit(*name);
-        if (edit == nullptr) {
-            const marrow::runtime::IkConstraintData* runtime_constraint =
-                shell::find_named_constraint(skeleton.ik_constraints(), *name);
-            if (runtime_constraint == nullptr) {
-                return make_error(
-                    "IK constraint not found in runtime skeleton.",
-                    op,
-                    spec,
-                    "not_found");
-            }
-
-            IkConstraintEdit new_edit;
-            new_edit.name = std::string(*name);
-            new_edit.bone_names =
-                names_from_indices(skeleton.bones(), runtime_constraint->bone_indices);
-            if (runtime_constraint->target_bone_index < skeleton.bones().size()) {
-                new_edit.target_bone_name =
-                    skeleton.bones()[runtime_constraint->target_bone_index].name;
-            }
-            new_edit.mix = runtime_constraint->mix;
-            new_edit.bend_positive = runtime_constraint->bend_positive;
-            new_edit.softness = runtime_constraint->softness;
-            new_edit.compress = runtime_constraint->compress;
-            new_edit.stretch = runtime_constraint->stretch;
-
-            editable_project.ik_constraint_edits.push_back(std::move(new_edit));
-            edit = &editable_project.ik_constraint_edits.back();
-        }
-
-        if (const json::Value* target_val = json::find_member(*args, "target")) {
-            if (target_val->is_string()) {
-                edit->target_bone_name = target_val->as_string();
-            } else if (!target_val->is_null()) {
-                return make_error("target must be string or null.", op, spec);
-            }
-        }
-
-        if (const json::Value* bones_val = json::find_member(*args, "bone_names")) {
-            if (!bones_val->is_array()) {
-                return make_error("bone_names must be an array of strings.", op, spec);
-            }
-            edit->bone_names.clear();
-            for (const auto& bone : bones_val->as_array()) {
-                if (!bone.is_string()) {
-                    return make_error("bone_names must be an array of strings.", op, spec);
-                }
-                edit->bone_names.push_back(bone.as_string());
-            }
-        }
-
-        if (const json::Value* mix_val = json::find_member(*args, "mix")) {
-            if (mix_val->is_number()) {
-                edit->mix = mix_val->as_number();
-            } else if (!mix_val->is_null()) {
-                return make_error("mix must be number or null.", op, spec);
-            }
-        }
-
-        if (const json::Value* bend_val = json::find_member(*args, "bend_positive")) {
-            if (bend_val->is_boolean()) {
-                edit->bend_positive = bend_val->as_boolean();
-            } else if (!bend_val->is_null()) {
-                return make_error("bend_positive must be bool or null.", op, spec);
-            }
+        if (IkConstraintEdit* existing =
+                editable_project.find_ik_constraint_edit(*name)) {
+            *existing = std::move(merged);
+        } else {
+            editable_project.ik_constraint_edits.push_back(std::move(merged));
         }
 
         if (auto result = commit_or_error(
@@ -795,7 +847,8 @@ AgentDispatchResult handle_constraint_operation(
             return std::move(*result);
         }
 
-        return make_success("Edited IK constraint successfully.", op, spec);
+        return make_success(
+            "Edited IK constraint successfully.", op, spec, std::move(live_delta));
     }
 
     if (op == "edit_path_constraint") {
@@ -806,6 +859,159 @@ AgentDispatchResult handle_constraint_operation(
     }
     if (op == "edit_physics_constraint") {
         return handle_constraint_edit<PhysicsConstraintTraits>(session, cmd, op, spec);
+    }
+
+    if (op == "constraint.rename" || op == "constraint.delete") {
+        const bool is_rename = op == "constraint.rename";
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                std::string(op) + " requires 'args' object.", op, spec);
+        }
+
+        const auto family_key = string_arg(*args, "family");
+        if (!family_key.has_value()) {
+            return make_error(
+                std::string(op) + " requires 'family' string.", op, spec);
+        }
+        const auto family = parse_constraint_family(*family_key);
+        if (!family.has_value()) {
+            return make_error(
+                "Unknown constraint family '" + std::string(*family_key) +
+                    "'; expected ik, path, transform, or physics.",
+                op,
+                spec);
+        }
+
+        const std::string_view source_key = is_rename ? "from" : "name";
+        const auto source = string_arg(*args, source_key);
+        if (!source.has_value()) {
+            return make_error(
+                std::string(op) + " requires '" + std::string(source_key) +
+                    "' string.",
+                op,
+                spec);
+        }
+        std::string destination;
+        if (is_rename) {
+            const auto target = string_arg(*args, "to");
+            if (!target.has_value()) {
+                return make_error(
+                    std::string(op) + " requires 'to' string.", op, spec);
+            }
+            destination = std::string(*target);
+        }
+        const std::string source_name(*source);
+
+        // Captured from the pre-mutation runtime by both paths, so the dry-run
+        // and live payloads report the same skins.
+        const std::vector<std::string> affected_skins =
+            constraint_affected_skins(skeleton, *family, source_name);
+
+        // One builder for both payloads, so they cannot diverge; the equality
+        // assertion in the smoke is then meaningful rather than tautological.
+        const auto catalog_delta = [&](bool dry_run,
+                                       bool used_operation,
+                                       bool changed_upsert) {
+            json::Value::Object delta;
+            if (dry_run) {
+                delta.emplace("dry_run", bool_value(true));
+            }
+            delta.emplace(
+                "family", string_value(std::string(constraint_family_key(*family))));
+            if (is_rename) {
+                delta.emplace("from", string_value(source_name));
+                delta.emplace("to", string_value(destination));
+            } else {
+                delta.emplace("name", string_value(source_name));
+            }
+            const char* ownership = used_operation
+                ? (changed_upsert ? "shadowed" : "base")
+                : "project";
+            delta.emplace("ownership", string_value(std::string(ownership)));
+            delta.emplace("used_operation", bool_value(used_operation));
+            delta.emplace("changed_upsert", bool_value(changed_upsert));
+            delta.emplace("skins", string_array_value(affected_skins));
+            delta.emplace("skin_reference_count", number_value(affected_skins.size()));
+            return object_value(std::move(delta));
+        };
+
+        // `make_error`'s default code applies only when none is supplied, so a
+        // coded rejection must take the four-argument overload.
+        //
+        // Spec §4.2: an atlas-free project is `invalid_project`, never
+        // `not_found`. A caller retrying a `not_found` re-sends with a different
+        // name and fails identically forever; the name was never the problem.
+        const auto reject = [&](const std::string& message) {
+            if (message == "at least one atlas path is required") {
+                return make_error(message, op, spec, "invalid_project");
+            }
+            return message.find("does not exist") != std::string::npos
+                ? make_error(message, op, spec, "not_found")
+                : make_error(message, op, spec);
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            // The dry run copies the project and runs the SAME primitive, so a
+            // rejection message cannot drift from the live call's.
+            ProjectData candidate = *session.project();
+            const ConstraintLifecycleResult preview = is_rename
+                ? rename_constraint(
+                      &candidate,
+                      *session.base_skeleton_document(),
+                      *family,
+                      source_name,
+                      destination)
+                : delete_constraint(
+                      &candidate,
+                      *session.base_skeleton_document(),
+                      *family,
+                      source_name);
+            if (!preview.ok) {
+                return reject(preview.message);
+            }
+            return make_success(
+                is_rename ? "Constraint rename validated."
+                          : "Constraint delete validated.",
+                op,
+                spec,
+                catalog_delta(true, preview.used_operation, preview.changed_upsert));
+        }
+
+        // `shell::constraint_kind_label()` lives in the shell target, which the
+        // editor library does not link, so the label uses the wire family key --
+        // the same spelling the payload reports.
+        const std::string family_label(constraint_family_key(*family));
+        const std::string label = is_rename
+            ? "Renamed " + family_label + " constraint " + source_name + " to " +
+                destination + " via Agent"
+            : "Deleted " + family_label + " constraint " + source_name + " via Agent";
+
+        // The agent owns no SelectionSet -- `AgentCommandContext` is exactly
+        // `{session, control}` -- so it passes nullptr and the cascade is a
+        // no-op here by construction, not by omission.
+        const ConstraintCatalogResult result = apply_constraint_catalog_edit(
+            session,
+            {is_rename ? ConstraintCatalogEditKind::Rename
+                       : ConstraintCatalogEditKind::Delete,
+             *family,
+             source_name,
+             destination},
+            nullptr,
+            {EditKind::EditProperty,
+             label,
+             "constraint-catalog",
+             false,
+             EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!result.ok) {
+            return reject(result.message);
+        }
+        return make_success(
+            is_rename ? "Renamed constraint successfully."
+                      : "Deleted constraint successfully.",
+            op,
+            spec,
+            catalog_delta(false, result.used_operation, result.changed_upsert));
     }
 
     return make_error(

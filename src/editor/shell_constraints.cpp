@@ -4,17 +4,23 @@
 #include "shell_selection.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <array>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "imgui.h"
 
 #include "shell_coalesced_edit.hpp"
 #include "shell_state.hpp"
+#include "shell_theme.hpp"
+#include "marrow/editor/constraint_catalog.hpp"
 #include "shell_widgets.hpp"
 #include "marrow/editor/agent_dispatch.hpp"
 
@@ -620,6 +626,339 @@ bool draw_string_combo(
 }
 
 
+namespace {
+
+// `validate_project_for_save()`'s own sentence, matched verbatim so the surface
+// clause below can never be attached to a different refusal.
+constexpr char kAtlasRequiredMessage[] = "at least one atlas path is required";
+constexpr char kAtlasRefusalPrefix[] =
+    "Cannot rename: the project must reference at least one atlas before it can "
+    "be saved. ";
+
+constexpr char kConstraintRenamePopup[] = "Rename Constraint##constraint_catalog";
+constexpr char kConstraintDeletePopup[] = "Delete Constraint##constraint_catalog";
+
+// One popup state for all four family branches, so the dialogs survive a tab
+// switch and are drawn once rather than four times.
+struct ConstraintCatalogPopupState {
+    ConstraintCatalogAction action{ConstraintCatalogAction::Rename};
+    ConstraintKind family{ConstraintKind::Ik};
+    std::string source;
+    std::array<char, 128> name{};
+    std::vector<std::string> affected_skins;
+};
+
+ConstraintCatalogPopupState g_constraint_catalog_popup;
+
+/** @brief Renders the shared "N skin(s): a, b" clause, or an empty string. */
+std::string constraint_skin_clause(const std::vector<std::string>& skins) {
+    if (skins.empty()) {
+        return {};
+    }
+    std::ostringstream stream;
+    stream << skins.size() << (skins.size() == 1U ? " skin: " : " skins: ");
+    for (std::size_t index = 0U; index < skins.size(); ++index) {
+        if (index != 0U) stream << ", ";
+        stream << skins[index];
+    }
+    return stream.str();
+}
+
+void seed_constraint_catalog_popup(
+    ShellState* state,
+    ConstraintCatalogAction action,
+    ConstraintKind family,
+    std::string source) {
+    g_constraint_catalog_popup.action = action;
+    g_constraint_catalog_popup.family = family;
+    g_constraint_catalog_popup.source = std::move(source);
+    g_constraint_catalog_popup.affected_skins.clear();
+    if (state != nullptr && state->load_result &&
+        state->load_result.skeleton_data != nullptr) {
+        g_constraint_catalog_popup.affected_skins =
+            marrow::editor::constraint_affected_skins(
+                *state->load_result.skeleton_data,
+                family,
+                g_constraint_catalog_popup.source);
+    }
+    // The rename buffer is re-seeded from the current name on every open, so a
+    // half-typed abandoned name never reappears.
+    std::snprintf(
+        g_constraint_catalog_popup.name.data(),
+        g_constraint_catalog_popup.name.size(),
+        "%s",
+        g_constraint_catalog_popup.source.c_str());
+}
+
+} // namespace
+
+const std::vector<std::string>& pending_constraint_affected_skins() noexcept {
+    return g_constraint_catalog_popup.affected_skins;
+}
+
+void request_constraint_rename(
+    ShellState* state,
+    ConstraintKind family,
+    std::string source) {
+    seed_constraint_catalog_popup(
+        state, ConstraintCatalogAction::Rename, family, std::move(source));
+}
+
+void request_constraint_delete(
+    ShellState* state,
+    ConstraintKind family,
+    std::string name) {
+    seed_constraint_catalog_popup(
+        state, ConstraintCatalogAction::Delete, family, std::move(name));
+}
+
+void cancel_constraint_catalog(ShellState* state) {
+    // Cancel never reaches the command, so no transaction is begun and the
+    // project serialization and history are untouched.
+    g_constraint_catalog_popup.source.clear();
+    g_constraint_catalog_popup.affected_skins.clear();
+    g_constraint_catalog_popup.name[0] = '\0';
+    if (state != nullptr) {
+        state->error_message.clear();
+    }
+}
+
+bool confirm_constraint_rename(ShellState* state, std::string_view destination) {
+    if (g_constraint_catalog_popup.source.empty()) {
+        return false;
+    }
+    return apply_constraint_catalog_action(
+        state,
+        ConstraintCatalogAction::Rename,
+        g_constraint_catalog_popup.family,
+        g_constraint_catalog_popup.source,
+        destination);
+}
+
+bool confirm_constraint_delete(ShellState* state) {
+    if (g_constraint_catalog_popup.source.empty()) {
+        return false;
+    }
+    return apply_constraint_catalog_action(
+        state,
+        ConstraintCatalogAction::Delete,
+        g_constraint_catalog_popup.family,
+        g_constraint_catalog_popup.source,
+        {});
+}
+
+bool apply_constraint_catalog_action(
+    ShellState* state,
+    ConstraintCatalogAction action,
+    ConstraintKind family,
+    std::string_view source,
+    std::string_view destination) {
+    if (state == nullptr || !state->session.has_project() ||
+        state->session.base_skeleton_document() == nullptr) {
+        return false;
+    }
+    if (authoring_gesture_active(*state) || state->session.transaction_active()) {
+        state->status_message = "Finish the active edit before editing constraints";
+        return false;
+    }
+
+    const std::string source_name(source);
+    const std::string destination_name(destination);
+    const std::string family_label = constraint_kind_label(family);
+    const std::string label = action == ConstraintCatalogAction::Rename
+        ? "Renamed " + family_label + " constraint " + source_name + " to " +
+            destination_name
+        : "Deleted " + family_label + " constraint " + source_name;
+
+    const marrow::editor::ConstraintCatalogEdit edit{
+        action == ConstraintCatalogAction::Rename
+            ? marrow::editor::ConstraintCatalogEditKind::Rename
+            : marrow::editor::ConstraintCatalogEditKind::Delete,
+        family,
+        source_name,
+        destination_name};
+
+    const marrow::editor::ConstraintCatalogResult result =
+        marrow::editor::apply_constraint_catalog_edit(
+            state->session,
+            edit,
+            &state->selection,
+            {marrow::editor::EditKind::EditProperty,
+             label,
+             "constraint-catalog",
+             false,
+             marrow::editor::EditImpact::Project |
+                 marrow::editor::EditImpact::Runtime |
+                 marrow::editor::EditImpact::Preview});
+    if (!result.ok) {
+        // Spec §4.2: the validator's own sentence is passed through verbatim --
+        // a surface must never paraphrase a validator or the two drift -- and
+        // the clause in front of it says which action was refused and why the
+        // two are connected. Matched on the message TEXT rather than on a
+        // re-derived atlas check, so the prefix cannot fire on a state
+        // `validate_project_for_save()` would have accepted.
+        state->error_message = result.message == kAtlasRequiredMessage
+            ? std::string(kAtlasRefusalPrefix) + result.message
+            : result.message;
+        state->status_message = "Constraint edit failed";
+        sync_shell_from_editor_session(state);
+        return false;
+    }
+
+    sync_shell_from_editor_session(state);
+    state->selected_timeline_track_id.reset();
+    state->error_message.clear();
+    state->status_message = label;
+    return true;
+}
+
+bool reconcile_constraint_selection(ShellState* state) {
+    if (state == nullptr || !state->load_result ||
+        state->load_result.skeleton_data == nullptr) {
+        return false;
+    }
+    const marrow::runtime::SkeletonData& skeleton = *state->load_result.skeleton_data;
+    return state->selection.prune(
+        [&](const marrow::editor::SelectionItem& item) {
+            const auto* constraint =
+                std::get_if<marrow::editor::ConstraintSelection>(&item);
+            return constraint == nullptr ||
+                marrow::editor::selection_item_exists(item, skeleton);
+        });
+}
+
+namespace {
+
+void draw_constraint_catalog_buttons(
+    ShellState* state,
+    ConstraintKind family,
+    const std::string& selected_name) {
+    // The same gate the animation catalog uses, and the same one
+    // `apply_project_command_change` already enforces at the seam below.
+    const bool catalog_blocked =
+        authoring_gesture_active(*state) || state->session.transaction_active();
+    ImGui::BeginDisabled(catalog_blocked || selected_name.empty());
+    if (ImGui::Button("Rename...")) {
+        state->error_message.clear();
+        request_constraint_rename(state, family, selected_name);
+        ImGui::OpenPopup(kConstraintRenamePopup);
+    }
+    ImGui::SameLine();
+    // There is deliberately no last-constraint gate: a family may legitimately
+    // be empty, which is why an emptied family array erases its key.
+    if (ImGui::Button("Delete...")) {
+        state->error_message.clear();
+        request_constraint_delete(state, family, selected_name);
+        ImGui::OpenPopup(kConstraintDeletePopup);
+    }
+    ImGui::EndDisabled();
+}
+
+void draw_constraint_catalog_popups(ShellState* state) {
+    const bool catalog_blocked =
+        authoring_gesture_active(*state) || state->session.transaction_active();
+    const char* family_label =
+        constraint_kind_label(g_constraint_catalog_popup.family);
+
+    if (ImGui::BeginPopupModal(
+            kConstraintRenamePopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(
+            "Rename %s constraint '%s'.",
+            family_label,
+            g_constraint_catalog_popup.source.c_str());
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        const bool enter_pressed = ImGui::InputText(
+            "Name",
+            g_constraint_catalog_popup.name.data(),
+            g_constraint_catalog_popup.name.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        const std::string candidate(g_constraint_catalog_popup.name.data());
+
+        // A preview of the primitive's rejection, never a substitute for it:
+        // the primitive still runs and is still authoritative. A collision is
+        // refused rather than auto-suffixed, so `unique_constraint_name()` --
+        // the create path's allocator -- is deliberately not called here.
+        const bool taken = !candidate.empty() &&
+            candidate != g_constraint_catalog_popup.source &&
+            state->load_result && state->load_result.skeleton_data != nullptr &&
+            constraint_exists(
+                *state->load_result.skeleton_data,
+                g_constraint_catalog_popup.family,
+                candidate);
+        if (taken) {
+            ImGui::Text(
+                "'%s' is already taken by another %s constraint.",
+                candidate.c_str(),
+                family_label);
+        } else {
+            const std::string clause = constraint_skin_clause(
+                g_constraint_catalog_popup.affected_skins);
+            if (!clause.empty()) {
+                ImGui::Text("Referenced by %s", clause.c_str());
+            }
+        }
+
+        if (!state->error_message.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kStateErr);
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        const bool can_apply = !candidate.empty() && !taken &&
+            candidate != g_constraint_catalog_popup.source && !catalog_blocked;
+        ImGui::BeginDisabled(!can_apply);
+        const bool apply_pressed = ImGui::Button("Rename") || enter_pressed;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            cancel_constraint_catalog(state);
+            ImGui::CloseCurrentPopup();
+        } else if (apply_pressed && can_apply &&
+                   confirm_constraint_rename(state, candidate)) {
+            ImGui::CloseCurrentPopup();
+        }
+        // On a rejection the modal stays open with the primitive's message, so
+        // the user can correct the name in place.
+        ImGui::EndPopup();
+    }
+
+    if (ImGui::BeginPopupModal(
+            kConstraintDeletePopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text(
+            "Delete %s constraint '%s'?",
+            family_label,
+            g_constraint_catalog_popup.source.c_str());
+        const std::string clause =
+            constraint_skin_clause(g_constraint_catalog_popup.affected_skins);
+        if (!clause.empty()) {
+            ImGui::Text("Also removes it from %s", clause.c_str());
+        }
+        ImGui::TextDisabled("This action can be undone.");
+        if (!state->error_message.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme::kStateErr);
+            ImGui::TextWrapped("%s", state->error_message.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::Spacing();
+        ImGui::BeginDisabled(catalog_blocked);
+        const bool delete_pressed = ImGui::Button("Delete");
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            cancel_constraint_catalog(state);
+            ImGui::CloseCurrentPopup();
+        } else if (delete_pressed && !catalog_blocked &&
+                   confirm_constraint_delete(state)) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+} // namespace
+
 void draw_constraints_window(ShellState* state) {
     ImGui::Begin(kConstraintsWindowTitle);
     widgets::panel_head(state->icons, Icon::ConstraintIk, "Constraints");
@@ -637,7 +976,25 @@ void draw_constraints_window(ShellState* state) {
     const std::vector<std::string> path_slots = path_slot_names(skeleton);
     constexpr double kZero = 0.0;
     constexpr double kOne = 1.0;
-    constexpr double kTen = 10.0;
+    // MAR-179. THE RULE, stated once: a constraint widget's [min,max] IS the
+    // loader's bound, and only then may it clamp. Where a widget's range was
+    // NARROWER than the loader's, clamping would refuse a value the format
+    // accepts, so the widget is re-formed to the loader's bound instead of
+    // gaining the flag (physics Damping/Strength). Where the correct range is
+    // not knowable from the field alone, neither is applied (path Spacing,
+    // whose range depends on spacing_mode).
+    //
+    // kUnbounded is not an invented ceiling: with p_min = 0 and p_max = DBL_MAX,
+    // AlwaysClamp enforces exactly ">= 0", which is exactly the loader's bound.
+    // DragScalar uses the range only for clamping; the rate comes from v_speed.
+    constexpr double kUnbounded = std::numeric_limits<double>::max();
+    // The loader requires step > 0 (skeleton_parse.cpp, "physics step must be
+    // greater than zero"). The display format is "%.4f", so 1e-4 is the
+    // smallest value the widget can show distinctly AND is strictly positive.
+    // The bound is derived from the format, not chosen: any smaller minimum
+    // would display as 0.0000 while storing something else.
+    constexpr double kMinPhysicsStep = 1e-4;
+    constexpr ImGuiSliderFlags kClamp = ImGuiSliderFlags_AlwaysClamp;
 
     const auto constraint_group = [&](ConstraintKind kind, std::string_view name) {
         return std::string("constraint:") + constraint_kind_label(kind) + ":" +
@@ -737,6 +1094,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Ik, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted("Select an IK constraint to edit it.");
             } else {
@@ -824,7 +1182,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_mix,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     mix_changed,
@@ -840,6 +1199,37 @@ void draw_constraints_window(ShellState* state) {
                         }
                     });
 
+                // MAR-179. Softness is unvalidated at ALL THREE loader layers
+                // and the runtime reads a negative as zero, so the widget must
+                // not invent a ceiling the format does not have. It enforces
+                // non-negativity only, which narrows nothing: to the runtime a
+                // negative softness and zero are already the same value.
+                double edited_softness = display_edit.softness;
+                const bool softness_changed = ImGui::DragScalar(
+                    "Softness",
+                    ImGuiDataType_Double,
+                    &edited_softness,
+                    0.5f,
+                    &kZero,
+                    &kUnbounded,
+                    "%.2f",
+                    kClamp);
+                apply_constraint_project_drag(
+                    state,
+                    softness_changed,
+                    EditActionKind::EditProperty,
+                    "Updated IK softness on " + selected_name,
+                    constraint_group(ConstraintKind::Ik, selected_name),
+                    false,
+                    "IK constraint edit failed",
+                    [&]() {
+                        if (const auto edit_index =
+                                ensure_ik_constraint_edit_index(state, selected_name)) {
+                            project->ik_constraint_edits[*edit_index].softness =
+                                edited_softness;
+                        }
+                    });
+
                 bool bend_positive = display_edit.bend_positive;
                 if (ImGui::Checkbox("Bend Positive", &bend_positive)) {
                     namespace json = marrow::runtime::json;
@@ -848,6 +1238,35 @@ void draw_constraints_window(ShellState* state) {
                     json::Value::Object args_obj;
                     args_obj.emplace("name", json::Value(selected_name, {}));
                     args_obj.emplace("bend_positive", json::Value(bend_positive, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    dispatch_agent_command(state, json::Value(std::move(cmd_obj), {}));
+                }
+
+                // MAR-179. Instantaneous toggles dispatch; dragged scalars
+                // coalesce. That split is inherited from Bend Positive, not
+                // invented here -- and it is why the GUI gap and the agent gap
+                // are ONE story: these two checkboxes cannot work until
+                // edit_ik_constraint reads `compress` and `stretch`.
+                bool compress = display_edit.compress;
+                if (ImGui::Checkbox("Compress", &compress)) {
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("compress", json::Value(compress, {}));
+                    cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
+                    dispatch_agent_command(state, json::Value(std::move(cmd_obj), {}));
+                }
+
+                bool stretch = display_edit.stretch;
+                if (ImGui::Checkbox("Stretch", &stretch)) {
+                    namespace json = marrow::runtime::json;
+                    json::Value::Object cmd_obj;
+                    cmd_obj.emplace("op", json::Value("edit_ik_constraint", {}));
+                    json::Value::Object args_obj;
+                    args_obj.emplace("name", json::Value(selected_name, {}));
+                    args_obj.emplace("stretch", json::Value(stretch, {}));
                     cmd_obj.emplace("args", json::Value(std::move(args_obj), {}));
                     dispatch_agent_command(state, json::Value(std::move(cmd_obj), {}));
                 }
@@ -904,6 +1323,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Path, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted("Select a path constraint to edit it.");
             } else {
@@ -993,7 +1413,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_position,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     position_changed,
@@ -1009,6 +1430,13 @@ void draw_constraints_window(ShellState* state) {
                         }
                     });
 
+                // MAR-179 deliberately leaves Spacing ALONE. Its [0,1] range is
+                // NARROWER than the loader's ">= 0" and its correct range is
+                // spacing_mode-dependent -- a percentage in Percent mode, a
+                // distance in Length mode. Clamping it here would refuse values
+                // the format accepts; widening it without settling the
+                // mode-dependent range would be worse than a recorded,
+                // deliberate narrowness.
                 double edited_spacing = display_edit.spacing;
                 const bool spacing_changed = ImGui::SliderScalar(
                     "Spacing",
@@ -1063,7 +1491,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_rotate_mix,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     rotate_mix_changed,
@@ -1087,7 +1516,8 @@ void draw_constraints_window(ShellState* state) {
                     &edited_translate_mix,
                     &kZero,
                     &kOne,
-                    "%.2f");
+                    "%.2f",
+                    kClamp);
                 apply_constraint_project_drag(
                     state,
                     translate_mix_changed,
@@ -1156,6 +1586,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Transform, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted(
                     "Select a transform constraint to edit it.");
@@ -1260,7 +1691,8 @@ void draw_constraints_window(ShellState* state) {
                         &edited_value,
                         &kZero,
                         &kOne,
-                        "%.2f");
+                        "%.2f",
+                        kClamp);
                     apply_constraint_project_drag(
                         state,
                         changed,
@@ -1435,6 +1867,7 @@ void draw_constraints_window(ShellState* state) {
                         resolved.active_constraint->constraint_name) != nullptr
                 ? resolved.active_constraint->constraint_name
                 : std::string{};
+            draw_constraint_catalog_buttons(state, ConstraintKind::Physics, selected_name);
             if (selected_name.empty()) {
                 ImGui::TextUnformatted(
                     "Select a physics constraint to edit it.");
@@ -1506,19 +1939,27 @@ void draw_constraints_window(ShellState* state) {
                     }
                 }
 
-                auto update_positive_value = [&](const char* label,
-                                                 double value,
-                                                 auto setter,
-                                                 double max_value,
-                                                 std::string status) {
+                // MAR-179. Form B -- a non-negative magnitude, for a field the
+                // loader bounds only BELOW. `lo` is the loader's bound and the
+                // ceiling is DBL_MAX, so AlwaysClamp enforces exactly what the
+                // format accepts and nothing narrower.
+                const auto update_magnitude = [&](const char* label,
+                                                  double value,
+                                                  auto setter,
+                                                  double lo,
+                                                  float speed,
+                                                  const char* format,
+                                                  std::string status) {
                     double edited_value = value;
-                    const bool changed = ImGui::SliderScalar(
+                    const bool changed = ImGui::DragScalar(
                         label,
                         ImGuiDataType_Double,
                         &edited_value,
-                        &kZero,
-                        &max_value,
-                        "%.2f");
+                        speed,
+                        &lo,
+                        &kUnbounded,
+                        format,
+                        kClamp);
                     apply_constraint_project_drag(
                         state,
                         changed,
@@ -1534,38 +1975,154 @@ void draw_constraints_window(ShellState* state) {
                             }
                         });
                 };
-                update_positive_value(
+                // MAR-179. Form A -- a bounded mix, for a field the loader
+                // bounds on both sides at exactly [0, 1].
+                const auto update_mix = [&](const char* label,
+                                            double value,
+                                            auto setter,
+                                            std::string status) {
+                    double edited_value = value;
+                    const bool changed = ImGui::SliderScalar(
+                        label,
+                        ImGuiDataType_Double,
+                        &edited_value,
+                        &kZero,
+                        &kOne,
+                        "%.2f",
+                        kClamp);
+                    apply_constraint_project_drag(
+                        state,
+                        changed,
+                        EditActionKind::EditProperty,
+                        std::move(status),
+                        constraint_group(ConstraintKind::Physics, selected_name),
+                        false,
+                        "Physics constraint edit failed",
+                        [&]() {
+                            if (const auto edit_index =
+                                    ensure_physics_constraint_edit_index(state, selected_name)) {
+                                setter(&project->physics_constraint_edits[*edit_index], edited_value);
+                            }
+                        });
+                };
+
+                // MAR-179. The panel adopts the struct order, so that the
+                // panel, PhysicsConstraintData, the serialized `.marrow` JSON
+                // and PhysicsConstraintTraits::preview all enumerate the same
+                // fields in the same sequence -- a future field added to one is
+                // then visibly missing from the others. The only relocation is
+                // Mix##physics, from fourth to last.
+                update_magnitude(
+                    "Step",
+                    display_edit.step,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->step = value;
+                    },
+                    kMinPhysicsStep,
+                    0.0005f,
+                    "%.4f",
+                    "Updated physics step on " + selected_name);
+                update_magnitude(
+                    "X##physics",
+                    display_edit.x,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->x = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics x on " + selected_name);
+                update_magnitude(
+                    "Y##physics",
+                    display_edit.y,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->y = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics y on " + selected_name);
+                update_magnitude(
+                    "Rotate##physics",
+                    display_edit.rotate,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->rotate = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics rotate on " + selected_name);
+                update_magnitude(
+                    "Scale X##physics",
+                    display_edit.scale_x,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->scale_x = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics scale X on " + selected_name);
+                update_magnitude(
+                    "Shear X##physics",
+                    display_edit.shear_x,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->shear_x = value;
+                    },
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics shear X on " + selected_name);
+                update_magnitude(
+                    "Limit",
+                    display_edit.limit,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->limit = value;
+                    },
+                    kZero,
+                    1.0f,
+                    "%.2f",
+                    "Updated physics limit on " + selected_name);
+                update_mix(
                     "Inertia",
                     display_edit.inertia,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
                         edit->inertia = value;
                     },
-                    kOne,
                     "Updated physics inertia on " + selected_name);
-                update_positive_value(
+                // Damping and Strength are RE-FORMED, not clamped in place.
+                // Their old slider ceilings (10 and 50) were NARROWER than the
+                // loader's ">= 0", so adding the flag would have refused values
+                // the format accepts and existing projects may already carry.
+                update_magnitude(
                     "Damping",
                     display_edit.damping,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
                         edit->damping = value;
                     },
-                    kTen,
+                    kZero,
+                    0.05f,
+                    "%.2f",
                     "Updated physics damping on " + selected_name);
-                update_positive_value(
+                update_magnitude(
                     "Strength",
                     display_edit.strength,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
                         edit->strength = value;
                     },
-                    50.0,
+                    kZero,
+                    0.1f,
+                    "%.2f",
                     "Updated physics strength on " + selected_name);
-                update_positive_value(
-                    "Mix##physics",
-                    display_edit.mix,
+                update_magnitude(
+                    "Mass Inverse",
+                    display_edit.mass_inverse,
                     [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
-                        edit->mix = value;
+                        edit->mass_inverse = value;
                     },
-                    kOne,
-                    "Updated physics mix on " + selected_name);
+                    kZero,
+                    0.01f,
+                    "%.3f",
+                    "Updated physics mass inverse on " + selected_name);
 
                 const auto update_force = [&](const char* label,
                                               float value,
@@ -1623,11 +2180,19 @@ void draw_constraints_window(ShellState* state) {
                         edit->wind.y = value;
                     },
                     "Updated physics wind Y on " + selected_name);
+                update_mix(
+                    "Mix##physics",
+                    display_edit.mix,
+                    [](marrow::editor::PhysicsConstraintEdit* edit, double value) {
+                        edit->mix = value;
+                    },
+                    "Updated physics mix on " + selected_name);
             }
 
         }
     }
 
+    draw_constraint_catalog_popups(state);
     ImGui::End();
 }
 

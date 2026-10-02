@@ -1,13 +1,13 @@
 # Maroow 편집 기능 갭 분석 (vs Spine 4.2/4.3, Live2D Cubism 5.x)
 
-최종 갱신: 2026-08-20. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
+최종 갱신: 2026-09-02. 기준: MAR-141~153 편집 P0, MAR-122~128 Parameter Modeling,
 MAR-154 Runtime Explicit Duration, MAR-155 Editor Duration Authoring, MAR-156 Versioned User
 Preference Store, MAR-157 Typed SelectionSet, MAR-158 Selection Migration, MAR-159 Hierarchy
 Multi-Selection, MAR-160 Viewport Multi-Selection, MAR-161 Parent-Space Rotation Gizmo 및
 MAR-162 Signed Local Scale Gizmo, Task #28 핵심 경계 리팩터, MAR-163 Single-Vertex
 FFD Auto-Key, MAR-164 Attachment-local Multi-Vertex FFD, MAR-165 Share Project
 Viewport Transform Snapping, MAR-166 Grid/Magnetic FFD Vertex Snapping 및 MAR-167
-Synchronized Scalar Graph 완료 checkpoint,
+Synchronized Scalar Graph 및 MAR-168~MAR-191 편집 P1 완료 checkpoint,
 MAR-192~210 platform program 보류 결정과
 `.agents/tasks/prd-marrow-runtime.json`.
 조사 방법: runtime/renderer/editor 소스 전수 조사 + Spine/Live2D 공식 문서 확인.
@@ -20,13 +20,13 @@ Maroow 에디터의 강점은 **"이미 존재하는 리그 위에서의 애니�
 편집 P0 이후에는 트랜스폼 auto-key, 본/IK 타깃 이동 기즈모, 슬롯/디폼/이벤트/드로우오더 키잉,
 다중 키 선택·리타임·복사/잘라내기/붙여넣기, 애니메이션 CRUD, 4종 제약 저작, 웨이트 페인팅,
 어니언 스킨, 트랜잭션 기반 언두를 제공한다. MAR-122~128 이후에는 typed parameter/group/shape/deformer,
-ArtPath, expression/lip-sync, Parameter Modeling mode와 56개 에이전트 오퍼레이션까지 제공한다.
+ArtPath, expression/lip-sync, Parameter Modeling mode와 64개 에이전트 오퍼레이션까지 제공한다.
 
 현재 Spine/Live2D 대비 가장 큰 **미해결** 격차는 세 가지다:
 
 1. **고급 타임라인 저작 UX 미구현** — P0 도프시트와 MAR-167 읽기 전용 scalar graph view는 완성됐지만 graph point/Bezier handle 편집, 리타임 스케일, 커브 프리셋/자동 핸들/루프 동기화는 P1이다.
 2. **리그/메시 저작 불가** — 본·슬롯·스킨·어태치먼트·메시 지오메트리를 에디터에서 생성/삭제/편집할 수 없다(임포트 전용). 이는 오버레이 아키텍처의 의도된 결과지만, "에디터"로서는 결정적 제약.
-3. **파일·복구 UX 미완성** — atomic open/save-as, external-conflict workflow, structured Problems, staged/atomic PSD re-import가 남아 있다.
+3. **파일·복구 UX 미완성** — MAR-180이 그 아래의 primitive를 끝냈다: project 저장은 대상 디렉터리 temp+rename으로 원자적이 됐고(write·flush·close 오류를 모두 검사하므로 잘린 파일 위에서 성공을 보고하던 close-time 실패가 사라졌다), Save As는 다섯 경로 family를 identity 보존으로 rebase하며, `EditorSession::create`/`close`/`adopt_runtime_sources`가 all-or-nothing으로 동작한다. MAR-181이 그 위의 첫 UX 층을 올렸다: File 메뉴의 New/Open/Save/Save As와 의존성 없는 path modal, `Ctrl+S`. MAR-182가 그 위에 dirty intent state machine을 얹어 **작업을 버릴 수 있는 다섯 경로를 모두** Save/Discard/Cancel 하나로 묶었다 — New/Open/Reload/Quit과 네이티브 OS close다. 측정 결과 이전 상태는 "검사가 여럿이라 통일이 필요한" 것이 아니라 **검사가 하나도 없는** 것이었고, OS close는 veto할 방법 자체가 없었다. MAR-183이 그 위에 Recent Projects를 얹어 File I/O arc를 닫았다 — canonical·dedup·MRU·10개 상한 목록과 `Open Recent`/`Remove`/`Clear Missing` 표면이며, Recent 항목 열기는 MAR-182 gate를 그대로 통과한다. 저장 계층은 MAR-156부터 settings v1에 이미 있었으므로 이 이야기는 정책과 표면만 추가했고 `kEditorSettingsVersion`은 1 그대로다. 남은 것은 external-conflict workflow, structured Problems, staged/atomic PSD re-import다.
 
 이전의 네 번째 핵심 gap이던 **Live2D식 파라미터 모델링 레이어는 해소됐다**. MAR-121은 MAR-122에 통합됐고,
 MAR-122~128의 런타임·렌더러·프로젝트·에디터·Agent/MCP checkpoint가 2026-07-16에 검증됐다.
@@ -42,8 +42,10 @@ multi-turn auto-key를 완료했다. MAR-162는 frozen scale-free local axis와 
 auto-key를 2026-07-25에 완료했고 behavior-preserving Task #28 핵심 경계 리팩터와
 single-vertex FFD auto-key MAR-163과 attachment-local multi-vertex FFD MAR-164는 2026-08-16에
 완료했다. MAR-165 shared transform snapping, MAR-166 FFD grid/magnetic vertex snapping과
-MAR-167 synchronized scalar graph view는 2026-08-20에 완료했다. 다음 제품 milestone은 graph
-point editing을 담당하는 MAR-168이며 dependency는 완료된 MAR-167이다.
+MAR-167 synchronized scalar graph view는 2026-08-20에 완료했다. MAR-168 graph point editing과
+MAR-169 graphical shared Bezier handle editing, MAR-170 fixed curve preset·remembered
+default와 MAR-171 project-local automatic curve handle은 2026-08-30에 완료했다. 이후 MAR-172부터
+MAR-191까지 순서대로 완료되어 편집 P1이 닫혔다.
 MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 backlog다.
 
 ---
@@ -64,7 +66,7 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 
 | 영역 | 내용 | 위치 |
 |---|---|---|
-| 웨이트 페인팅 | Paint/Erase/Smooth 브러시, 반경/강도, 히트맵, 기존 자동 바인딩, 브러시별 top-4 정규화, 스트로크 단위 언두 | `shell_weight_paint.cpp` |
+| 웨이트 페인팅 | Paint/Erase/Smooth/Replace 브러시, 반경/강도, 히트맵, active-vertex 수치 influence 편집, selected-scope Normalize, setup-pose Rebind, 명시적 candidate 목록 기반 결정적 자동 weight 생성(Generate), 모든 경로가 공유하는 canonical 정규화, 스트로크 단위 언두 | `mesh_weight_model.cpp`, `authoring.cpp`, `shell_weight_paint.cpp` |
 | 키프레임 편집 | 본 R/T/S/shear, 슬롯 light RGBA/attachment, 메시 디폼, 드로우오더, 이벤트 — 추가/삭제/시간·값·보간 수정 | `timeline_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp` |
 | 보간 | 키별 Linear/Stepped/Bezier + 베지어 제어점 4개 숫자 입력 | `timeline_controller.cpp`, `shell_timeline.cpp` |
 | 재생 | 재생/일시정지(Space), 루프, 역재생, 스크럽, 이전/다음 키 스텝, 애니메이션 큐+믹스 프리뷰 | `timeline_controller.cpp`, `shell_timeline.cpp` |
@@ -75,22 +77,22 @@ MAR-192~210 qualification은 별도 재개 결정 전까지 open 병렬 보류 b
 | 뷰포트 저작 | 안정적 카메라, screen/world 역변환, cursor zoom, 명시적 Fit, 본/IK 타깃 X/Y/free 이동, frozen parent-space 회전, signed local X/Y/uniform scale, attachment-local multi-vertex FFD auto-key, project world-grid/local-angle/absolute-scale snap, inclusive 8px visible-vertex magnetic FFD snap과 live Alt/Cmd·Ctrl | `viewport_interaction_kernel.cpp`, `viewport_interaction_controller.cpp`, `viewport_ffd_controller.cpp`, `shell_viewport_ui.cpp` |
 | 도프시트/그래프 | 60 FPS 눈금자, 도프시트 독립 zoom/pan, 안정적 parent-key identity, toggle/box 선택, 다중 리타임, typed clipboard; 한 focused parent track의 effective scalar projection, component toggle/Fit/wheel·Shift-wheel/middle pan, shared selection/active/playhead, actual Linear/Stepped/Cubic 표시 | `timeline_model.cpp`, `timeline_graph_model.cpp`, `timeline_controller.cpp`, `shell_timeline.cpp`, `shell_timeline_graph.cpp` |
 | 애니메이션 관리 | create/duplicate/rename/delete, 확인 UI, ordered `.marrow.animation_edits`, queue/preview cascade | `authoring.cpp`, `shell_project_panels.cpp` |
-| 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두 | `shell_constraints.cpp` |
+| 제약 저작 | IK/경로/트랜스폼/물리 4종 모두 추가+파라미터 편집, 영구 저장+언두. MAR-177은 project layer에 rename/delete를 추가했다 — `.marrow.constraint_edits.operations`의 ordered record, base-backed/project-only ownership rule, root array와 `skins[].<family>` 동시 rewrite/prune | `shell_constraints.cpp`, `project.cpp` |
 | 언두/트랜잭션 | 스냅샷 100개 캡, 머지 키 그룹핑, 원자적 런타임 리빌드+실패 롤백 | `session.cpp` |
 | 어니언 스킨 | 프레임/키프레임 모드, 전후 개수, 스텝, 앵커 | `shell_viewport_ui.cpp` |
 | 임포트/익스포트 | PSD→리그 생성, Spine JSON/atlas 임포트, 아틀라스 패킹, `.mskl`/`.mbin`/`.matl` 익스포트 | `psd_import.cpp` 등 |
 | Parameter modeling | raw direct/final preview, 1D shape, 2D warp/rotation, full lattice·pivot gesture, expression/lip-sync, ArtPath runtime/render | `shell_parameters.cpp`, `parameter_project_model.cpp`, `parameter_model.cpp` |
-| 에이전트 표면 | 56개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 31). Animation CRUD·duration·atomic timeline retime·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
-| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 56-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
+| 에이전트 표면 | 64개 오퍼레이션(조회 12, 검증 3, 관리 10, 편집 39). Animation CRUD·duration·atomic timeline retime·timeline interpolation·timeline curve mode·timeline loop sync·timeline key time scaling·mesh weight rebind·자동 weight 생성·constraint rename/delete·parameter authoring은 MCP 도구에도 노출 | `agent_dispatch.cpp`, `agent_handlers_editing.cpp`, `agent_handlers_parameters.cpp`, `tools/mcp/tools/editing.py` |
+| 종합 회귀 방지 | base-only timeline materialization, typed parameter model, duration save/reload·rollback·auto-grow, undo/redo, JSON↔MBIN, 64-op registry와 Parameter shell을 feature별 headless smoke로 검증 | `editor_project_smoke.cpp`, `parameter_project_smoke.cpp`, `shell_smoke_timeline.cpp`, `shell_smoke_parameters.cpp`, `agent_dispatch_smoke.cpp` |
 
 ### 남아 있는 의도적 제한/부분 구현
 
 - **Setup Pose/슬롯 setup 색상은 의도적으로 read-only** — Animation 모드 본 포즈는 항상 playhead auto-key이고, 슬롯 light/attachment는 timeline editor에서 저작한다. 저장되지 않는 preview-only 포즈/색상 입력은 없다.
 - **inherit timeline은 read-only** — project overlay는 MAR-184, 편집 parity는 MAR-185로 미뤘다.
 - **뷰포트는 이동·회전·signed scale·attachment-local multi-vertex FFD와 transform/FFD snap까지 직접 저작** — FFD point/toggle/box sub-selection, common-world-delta group move, world-grid/local-angle/absolute-scale snap, visible nonselected vertex magnetic snap과 live modifier/guide가 구현됐다. 경로 제어점 직접 조작과 entity `SelectionSet`의 group transform은 P1 범위 밖이다.
-- **그래프 view는 읽기 전용** — MAR-167은 effective Transform/Slot RGBA scalar series, actual easing, shared parent selection/active/playhead와 transient navigation을 제공한다. Point time/value 편집과 Bezier handle, preset/auto handle/loop 동기화는 MAR-168~172다. 선택 키 시간 스케일과 preview 속도는 MAR-173~174다.
-- **제약 파라미터 일부 위젯 없음** — IK softness/compress/stretch, Physics step/x/y/rotate/scaleX/shearX/limit/massInverse (라운드트립은 됨).
-- **제약 삭제/이름변경 불가** — lifecycle schema는 MAR-177, UI·agent surface는 MAR-178, 누락 위젯은 MAR-179 범위다.
+- **그래프 view는 값·시간·easing 편집까지 지원** — MAR-167은 effective Transform/Slot RGBA scalar series, actual easing, shared parent selection/active/playhead와 transient navigation을 제공했고, MAR-168은 axis-locked point drag로 active component 값과 parent key 전체 시간 편집을 공용 authoring primitive 위에서 추가했으며, MAR-169는 active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집하고, MAR-170은 두 timeline tab 공용 row에서 고정 preset 6종을 호환 선택 key 전체에 한 transaction으로 적용하며 기억되는 기본 curve로 새 key를 seed한다. Auto handle과 loop 동기화는 MAR-171~172이고, MAR-173은 선택 범위 반대 edge를 pivot으로 한 원자적 key 시간 scaling을 dopesheet selection range bar와 `timeline.scale_key_times`로 추가했다. MAR-174는 transport row에 `[0.05, 8.0]` transient preview 속도와 `{0.25, 0.5, 1, 2}` preset을 얹어 `advance_timeline_playback()` 한 곳의 곱셈으로 reverse·loop·scrub·일시정지와 합성하되 project·history·export에는 아무 흔적도 남기지 않는다. 수동 weight 저작 통합은 MAR-175다.
+- **제약 파라미터 위젯 완료** — MAR-179가 IK `softness`/`compress`/`stretch`와 physics `step`/`x`/`y`/`rotate`/`scaleX`/`shearX`/`limit`/`massInverse` 11개 위젯을 올려 runtime이 읽는 IK·physics 필드는 모두 편집 가능해졌다. 같은 이야기의 반대편으로 `edit_ik_constraint`가 `softness`/`compress`/`stretch`를 받고 나머지 세 family처럼 9-key dry-run/live `scene_delta`를 돌려주며, MCP schema는 그 셋과 C++가 늘 읽어오던 `merge`까지 네 property를 추가로 선언한다. 함께 네 family의 모든 constraint slider에 `ImGuiSliderFlags_AlwaysClamp`를 붙였다 — 단, loader 범위보다 좁던 physics `Damping`/`Strength`는 clamp 대신 하한만 있는 drag로 다시 만들었고, 올바른 범위가 `spacing_mode`에 달린 path `Spacing`은 의도적으로 그대로 뒀다.
+- **제약 삭제/이름변경 완료** — MAR-177이 `.marrow.constraint_edits.operations` ordered schema, `rename_constraint()`/`delete_constraint()` primitive, materialization과 두 층 validation을 추가했고, MAR-178이 네 family 모두에 `Rename... / Delete...` 버튼과 확인 dialog, UI 없는 undoable command `apply_constraint_catalog_edit()`, `SelectionSet` cascade, 그리고 `constraint.rename`/`constraint.delete` agent/MCP operation을 올렸다. 그래서 registry는 그 시점에 정확히 64 ops였다. 누락 위젯(IK `softness`/`compress`/`stretch`, physics `step`/`x`/`y` 등)은 MAR-179가 닫았고, registry는 64 ops 그대로였다. 이후 MAR-185가 `set_inherit_keyframe`/`remove_inherit_keyframe` 둘을 더해 2026-09-01 현재 66 ops다.
 - **Hierarchy와 viewport entity gesture 완료** — MAR-159는 visible row range와 transient anchor를, MAR-160은 typed point hit와 visible active-Bone box selection을 완료했다. 모든 도구는 active item 하나만 편집하며 group transform은 범위 밖이다.
 
 ---
@@ -155,13 +157,13 @@ Agent/MCP dry-run을 연결했다. 키 생성·오른쪽 이동은 명시 경계
 |---|---|---|
 | 메시 지오메트리 편집 (버텍스 추가/이동/삭제, 엣지/헐) | Mesh 편집 [CORE] | 수동 메시 편집 [CORE] |
 | 오토메시 (이미지 알파에서 자동 생성) | 4.3 다중 트레이스+균일 슬라이더 [CORE] | 자동 메시 생성기 (5.0 개선) [CORE] |
-| 명시적 candidate 목록 기반 결정적 오토 웨이트 | Bind+auto weights [CORE] | 스키닝 자동화 |
-| 웨이트 Replace 모드·수치 직접 편집·명시적 정규화 버튼 | 웨이트 툴 | — |
+| 명시적 candidate 목록 기반 결정적 오토 웨이트 — **MAR-176 완료** | Bind+auto weights [CORE] | 스키닝 자동화 |
 | 웨이트 복사/붙여넣기, Weld(메시 간 이음새) | [+] | Glue [CORE] |
 
-현재 brush와 agent 경로에는 서로 중복된 weight 정규화가 있고 기존 자동 바인딩은 P1의 명시적 candidate·결정성 계약을
-제공하지 않는다. MAR-175는 수동 도구와 agent를 하나의 canonical domain primitive로 합치고, MAR-176은 setup pose에서
-결정적인 top-4 auto-weight를 추가한다. 이 작업은 기존 `mesh_edits.weights` overlay 안에서 끝난다.
+MAR-175가 brush와 agent의 중복 정규화를 `mesh_weight_model`의 canonical primitive 하나로 합쳤고 Replace brush,
+active-vertex 수치 influence 표, selected-scope Normalize, setup-pose Rebind를 추가했다. 기존 자동 바인딩은 아직 P1의
+명시적 candidate·결정성 계약을 제공하지 않으며, MAR-176이 setup pose에서 결정적인 top-4 auto-weight를 추가한다.
+이 작업은 기존 `mesh_edits.weights` overlay 안에서 끝났다.
 
 반면 메시 지오메트리는 오버레이 모델상 편집 불가(베이스 문서 소유)다. `mesh_edits`를 지오메트리 override로 확장할지,
 베이스 문서 편집을 허용할지는 canonical authoring graph 설계가 선행되어야 하며 P1에는 포함하지 않는다.
@@ -187,7 +189,7 @@ Agent/MCP dry-run을 연결했다. 키 생성·오른쪽 이동은 명시 경계
 | Runtime | finite raw direct와 final composed buffer, discrete round/optional clamp, 1D endpoint/linear shape, bilinear warp, rotation pivot/influence, one-level deformer chain과 dependency cache |
 | Renderer | attachment-local final mesh offset, skeleton scale/mirror를 반영한 ArtPath root overlay, deterministic cap/join tessellation, atlas-free preparation과 cache 실패 원자성 |
 | Project/Editor | 일곱 optional parameter family의 typed·lossless save/reload/export, transient non-dirty preview, CRUD, 3×3 full lattice/pivot gesture, confirmed atomic keyform capture |
-| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration operation 포함 현재 56-op parity |
+| Agent/MCP | `parameters.list`와 mutation 5개(`parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`), candidate dry-run, MAR-128 C++/Python 55-op exact parity; MAR-155 duration, MAR-169 timeline interpolation, MAR-171 timeline curve mode, MAR-172 timeline loop sync, MAR-173 timeline key time scaling, MAR-175 `mesh.rebind_weights`, MAR-176 `mesh.generate_weights`와 MAR-178 `constraint.rename`/`constraint.delete` operation 포함 현재 64-op parity |
 | Compatibility/성능 | `.mskl` v1, `.mbin` v2, C ABI v1 유지. CTest 11/11, runtime 4/4, editor 5/5, 200 skeleton `frame_ms=4.45`/`score=100`, parameter `0.07us`/deformer `0.51us` |
 
 MAR-122~128 checkpoint 당시 29개 runtime/renderer unit, parameter project save/reload와 JSON↔MBIN compare,
@@ -202,7 +204,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 | 부재 기능 | 참조 | 심각도 |
 |---|---|---|
 | 전역 entity 멀티 셀렉트/박스 셀렉트 (도프시트 키 선택은 P0에서 구현) | 양쪽 다 [CORE] | 🟡 — P1은 selection/gesture와 active item 편집까지만 포함; group transform 제외 |
-| File 메뉴: New/Open/Save/Save As/Recent Projects | 양쪽 다 [CORE] | 🟡 — Save가 툴바에만 있음 |
+| File 메뉴: New/Open/Save/Save As/Recent Projects | 양쪽 다 [CORE] | 🟢 — MAR-181이 New/Open/Save/Save As를 File 메뉴와 외부 의존성 없는 ImGui path modal로 연결했다. 측정 결과 이전 상태는 🟡이 아니라 🔴에 가까웠다: Save만 툴바 아이콘으로 존재했고 New·Open·Save As는 **모든 표면에서 완전히 부재**였다. MAR-182가 그 위에 dirty-session prompt를 얹어 New/Open/Reload/Quit/OS close가 더는 경고 없이 작업을 버리지 않는다. MAR-183이 `Open Recent` submenu로 Recent Projects를 채워 이 행을 닫았다 — 사라진 항목은 보이되 비활성이고 `Remove`/`Clear Missing`이 제거 수단이다 |
 | 대칭 편집 — 반전 붙여넣기/미러 | Live2D 5.2 반전 형상 붙여넣기, Spine flip | 🟢 |
 | Problems 뷰 (경고 목록 + 클릭 이동 + allowlist 수정) | Spine 4.3 [+] | 🟢 — 기존 summary 위에 MAR-186 structured collector를 추가한 뒤 MAR-187 UI 연결 |
 | 숫자 필드 수식 입력 (`10 + v * 8`) | Spine 4.3 [+] | 🟢 |
@@ -219,7 +221,7 @@ N차원 keyform, Live2D 파일/Core/ABI 호환과 audio analysis다. Slider와 `
 
 - 단기 제품은 **임포트 리그 기반 애니메이션/후처리 에디터**다.
 - Setup Pose와 슬롯 dark tint는 P0에서 읽기 전용이다. Animation 모드의 R/T/S/shear 변경은 항상 현재 playhead의 키로 영속화한다.
-- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale, MAR-163~164 attachment-local FFD 직접 조작, MAR-165 transform snap과 MAR-166 FFD grid/magnetic vertex snap을 추가했고 MAR-167에서 synchronized scalar graph view를 완료했다. 다음 직접 제품 milestone은 MAR-168 graph point editing이다.
+- P0 뷰포트의 안정적 카메라와 본/IK 타깃 **이동** 기즈모 위에 MAR-160 typed point/box selection, MAR-161 parent-space 회전, MAR-162 signed local scale, MAR-163~164 attachment-local FFD 직접 조작, MAR-165 transform snap과 MAR-166 FFD grid/magnetic vertex snap을 추가했고 MAR-167 synchronized scalar graph view, MAR-168 graph point time/value editing, MAR-169 graphical shared Bezier handle editing과 MAR-170 fixed curve preset/remembered default를 완료했다. 이후 MAR-171 project-local automatic curve handle부터 MAR-191까지 순서대로 완료되어 편집 P1이 닫혔다.
 - MAR-154에서 호환 가능한 runtime explicit/inferred/effective duration 경계를, MAR-155에서 editor
   authoring·undo·Agent/MCP를 완료했다. 키 생성·오른쪽 이동은 같은 transaction에서 duration을 자동 연장하되
   키 삭제·왼쪽 이동은 자동 축소하지 않으며 마지막 키보다 짧은 수동 축소를 원자적으로 거부한다. Duration이 없는 기존
@@ -275,7 +277,7 @@ PRD 배열은 이 스토리를 MAR-120 직후에 둔다. P0 구현 체크포인�
 플랫폼 전환 코드의 순서는 SDL3 parity와 GLFW 제거(MAR-192~198), editor Sokol 전환과
 raw GL 제거(MAR-199~204), Windows/portable/physical-pen qualification(MAR-205~209), 같은
 revision 최종 로컬 매트릭스(MAR-210)다. 이 story들은 상태와 내부 dependency를 유지한 채 별도
-재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~167 및 다음 MAR-168~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
+재개 결정 전까지 open 병렬 보류 backlog이며 완료된 MAR-165~171 및 다음 MAR-172~191 제품 chain을 차단하지 않는다. 2026-08-12 범위 결정으로 Ubuntu/Linux와 Windows 10은
 `NOT REQUIRED`이고 별도 PC portable 실행도 필수 gate에서 제외됐다. 코드·단위 테스트가 구현돼도
 macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/resource/package 증거가
 모두 없으면 story를 done으로 표시하지 않는다. 상세 acceptance와 명령은 활성 PRD, 증거는
@@ -283,7 +285,7 @@ macOS arm64, Windows 11, 실물 pen, 고배율·수동 UI, pixel/performance/res
 
 ### P1 — MAR-154~191
 
-P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD, MAR-164 attachment-local multi-vertex FFD, MAR-165 project viewport transform snapping, MAR-166 FFD vertex snapping 및 MAR-167 synchronized scalar graph checkpoint는 통과했다. 다음 제품 chain은 완료된 MAR-167에 의존하는 MAR-168부터 MAR-191까지 순서를 유지한다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
+P1 시작 gate인 **MAR-128 완료 checkpoint**, MAR-154–155 duration checkpoint, MAR-156 preference checkpoint, MAR-157 typed selection, MAR-158 selection migration, MAR-159 hierarchy multi-selection, MAR-160 viewport multi-selection, MAR-161 parent-space rotation, MAR-162 signed local scale, Task #28 핵심 경계 리팩터, MAR-163 single-vertex FFD, MAR-164 attachment-local multi-vertex FFD, MAR-165 project viewport transform snapping, MAR-166 FFD vertex snapping, MAR-167 synchronized scalar graph, MAR-168 graph key time/value editing, MAR-169 graphical shared Bezier handle editing 및 MAR-170 fixed curve preset/remembered default checkpoint는 통과했다. MAR-170에 의존하는 MAR-171부터 MAR-191까지의 제품 chain은 순서대로 모두 완료됐다. 플랫폼 qualification은 별도 open 병렬 보류 backlog다.
 
 #### 기반·선택
 
@@ -366,7 +368,7 @@ MAR-167 checkpoint는 effective runtime animation에서 Bone R/T/S/shear와 Slot
 zoom, Shift-wheel value zoom, middle pan과 cache/view는 transient이며 duration, project bytes,
 dirty/history/revision과 56-operation Agent/MCP surface를 바꾸지 않는다. Linear/Stepped/Cubic은
 실제 outgoing easing과 서로 다른 marker로 표시하고 parent key 하나의 easing을 X/Y 또는 RGBA가
-공유한다. FFD와 discrete lane은 fail-closed empty state이며 value/time drag는 MAR-168 경계다.
+공유한다. FFD와 discrete lane은 fail-closed empty state다. MAR-168은 4px dead zone 이후 축을 고정하는 point drag로 세로는 active scalar component 값만, 가로는 parent key 전체 시간을 편집하며 frame snap·neighbour clamp·stable identity·explicit duration auto-grow를 dopesheet와 공유한다. MAR-169는 active key outgoing segment의 공용 Bezier handle을 그려 drag하고, X는 `[0,1]`로 clamp, finite Y overshoot는 허용하며 Linear/Stepped는 같은 transaction 안에서 Cubic으로 변환한다.
 Canonical `player_idle` effective animation은 valid arm_l Rotate overlay를 포함해 7 parent track/14
 scalar series다. 전체 gate와 platform qualification 비부여는 `AGENTS.md`의 MAR-167 checkpoint를 따른다.
 
@@ -386,13 +388,13 @@ scalar series다. 전체 gate와 platform qualification 비부여는 `AGENTS.md`
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
 | MAR-167 | Graph view (완료, 2026-08-20) | 한 focused Transform R/T/S/shear 또는 Slot RGBA parent의 effective scalar series를 component toggle/Fit/wheel·Shift-wheel/middle pan으로 표시하고 dopesheet의 parent selection/active/playhead를 공유한다. Actual outgoing easing을 표시하며 FFD/discrete lane과 persistent state, point drag를 제외한다. |
-| MAR-168 | Graph point editing | active component 값과 key 전체 시간을 drag한다. 시간 충돌·frame snap·duration auto-grow는 공용 authoring primitive를 사용한다. |
-| MAR-169 | Graphical Bezier handles | outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 drag한다. X는 `[0,1]`, Y는 finite overshoot를 허용하며 한 drag는 한 undo다. |
-| MAR-170 | Curve presets/default | Linear, Stepped, Ease, Ease-In, Ease-Out, Ease-In-Out 고정값을 제공하고 마지막 기본 curve를 user preference에 저장한다. |
-| MAR-171 | Automatic handles | `.marrow` 전용 manual/auto curve metadata와 driver component를 저장한다. Auto는 driver scalar에 monotone Fritsch–Carlson tangent를 적용하고 handle drag는 manual로 전환한다. |
-| MAR-172 | Persistent loop synchronization | lane별 opt-in metadata를 저장한다. 명시적 duration과 time 0 key가 있을 때만 duration boundary key를 관리하고 첫 값·curve·duration 변화를 같은 transaction에서 동기화한다. |
+| MAR-168 (완료, 2026-08-30) | Graph point editing | 4px dead zone 이후 dominant-axis로 축을 고정해 세로 drag는 active component 값만, 가로 drag는 key 전체 시간과 모든 component를 옮긴다. 시간 충돌·frame snap·stable identity·duration auto-grow는 `retime_keyframes()`를, 값은 새 `offset_keyframe_scalars()`를 하나의 `EditTransaction` 안에서 사용한다. |
+| MAR-169 (완료, 2026-08-30) | Graphical Bezier handles | active key outgoing segment의 공용 `[cx1,cy1,cx2,cy2]`를 handle drag로 편집한다. X는 `[0,1]`로 clamp하고 primitive는 범위 밖·비유한 값을 원자적으로 거부하며, finite Y overshoot는 허용한다. Linear/Stepped는 `[1/3,1/3,2/3,2/3]` seed로 같은 transaction·같은 undo에서 Cubic이 되고, 같은 mutation을 57번째 agent operation `timeline.set_interpolation`으로 노출한다. |
+| MAR-170 (완료, 2026-08-30) | Curve presets/default | Linear, Stepped, Ease `[0.25,0.1,0.25,1]`, Ease-In `[0.42,0,1,1]`, Ease-Out `[0,0,0.58,1]`, Ease-In-Out `[0.42,0,0.58,1]` 고정값을 `authoring.hpp`의 단일 `constexpr` table로 선언하고, Graph·Dopesheet 공용 row에서 호환 선택 key 전체에 MAR-169 primitive 하나로 적용한다. Easing이 없는 lane은 GUI가 건너뛰고 개수를 보고하며 agent는 원자적으로 거부한다. 현재 preset 표시는 저장된 `float32` 4값의 순수 함수라 handle drag 직후 `Custom`이 된다. 마지막 기본 curve는 MAR-156 `editor-settings.json`의 `default_curve`에 저장하고 project를 더럽히지 않는다. Registry는 57개 그대로이며 `timeline.set_interpolation`의 문자열 token 4개만 늘었다. |
+| MAR-171 (완료, 2026-08-30) | Automatic handles | Transform·Slot Color keyframe에만 `curve_mode`(`manual`|`auto`)와 `curve_driver` 두 optional field를 `.marrow` 전용으로 추가한다. 두 field가 없는 기존 project는 byte 단위로 동일하고, manual key는 아무것도 직렬화하지 않는다. Auto는 순수 translation unit `src/editor/curve_auto.cpp`의 monotone Fritsch–Carlson tangent를 기존 공용 `curve` field에 즉시 해석해 쓴다. 정규화 항등식이 `cx1 = 1/3`, `cx2 = 2/3`을 주므로 `cx ∈ [0, 1]` 형식 불변식이 clamp 없이 성립하고 `cy ∈ [0, 1]`도 disk 조건에서 따라 나와 automatic curve는 overshoot할 수 없다. 재계산은 이웃을 무효화한 바로 그 transaction 안에서 animation 전체를 대상으로 하며 history entry는 하나다. 절대 easing 쓰기는 `set_keyframe_interpolation()` 내부에서 manual로 강등하므로 handle drag·preset·inspector·agent가 모두 상속한다. Auto key의 왕복 drag는 강등 자체가 저작이라 commit하고, manual key의 왕복 drag는 여전히 cancel이다. Deform은 정규 scalar가 없어 제외하며 field 부재로 compile time에 강제된다. Load·save·export는 해석하지 않아 stale 쌍은 합법 data다. Registry는 `timeline.set_curve_mode`로 58이 됐고 두 field는 runtime file에 들어가지 않는다. |
+| MAR-172 (완료, 2026-08-30) | Persistent loop synchronization | Transform·Slot Color·Deform lane에만 `loop_sync` boolean 하나를 `.marrow` 전용으로 추가한다. Lane 값이 bare array라 flag는 `timeline_edits`와 같은 모양의 optional top-level `loop_sync` tree에 투영되고, 예전 build는 `preserved_root`로 보존해 loop를 정상 재생하되 유지만 멈춘다. Opt-in한 lane은 항상 `float32(explicit duration)` 위에 관리 key 하나를 갖고 그 값과 easing 기록은 time 0 key의 bit 단위 복사다. 전제 조건은 explicit duration과 time 0 key이고 관리 key의 정체성은 저장하지 않고 유도한다. 동기화는 `refresh_runtime()`/`commit()`의 auto-extend 직후 seam에서 caller의 transaction 안에 실행되며 두 phase 사이에 MAR-171 resolver가 들어가고 phase 2는 `set_keyframe_interpolation()`을 호출하지 않는다. Duration floor와 auto-extend가 관리 key를 제외해 opt-in한 clip도 줄일 수 있고 두 제외 모두 opt-in이 없으면 bit 단위 no-op이다. Retime은 양 끝을 고정하고 disable은 전제 평가 없이 항상 성공하며 key를 남긴다. 이산 3종은 field 부재로 compile time에 제외된다. Registry는 `timeline.set_loop_sync`로 59가 됐고 flag는 runtime file에 들어가지 않지만 관리 boundary key는 일반 keyframe으로 export된다. ImGui code는 추가하지 않는다. |
 | MAR-173 | Selected-key time scaling | 선택 범위 반대 edge를 pivot으로 양의 비율 scaling을 제공한다. Event tie는 보존하고 비-event 충돌·이웃 침범은 원자적으로 거부한다. |
-| MAR-174 | Preview playback speed | transient 0.05×~8×와 0.25/0.5/1/2× preset을 제공하고 reverse와 합성한다. project dirty/history에는 포함하지 않는다. |
+| MAR-174 (완료, 2026-08-30) | Preview playback speed | Timeline transport에 shell 전용 `double` 하나를 얹어 `[0.05, 8.0]` 연속 구간과 `{0.25, 0.5, 1, 2}` preset을 제공한다. Preset은 구간 자체가 아니라 구간 위의 단축키다. 곱셈은 preview 시간이 나아가는 유일한 경로인 `advance_timeline_playback()` 한 곳에서만 일어나고, `EditorSession::advance()`가 하나의 delta를 표시 시간·pose·crossfade·event로 넘기므로 넷이 구조적으로 함께 scaling된다. 속도는 크기이고 방향은 계속 `preview_reverse`다. 음수 delta는 `PreviewImpl::advance()`에서 조용한 no-op인 동시에 그 frame의 event를 전부 버리기 때문이다. `0.0`은 `0.05`로 clamp되며 정지가 아니고, 유한한 범위 밖 값은 clamp, 비유한 값은 field를 bit 단위로 두고 거부한다. `std::fmod` 단일 modulo라 8배속의 여러 주기 step도 누적 오차가 없고, `fmod`가 `[0, duration)`을 주므로 MAR-172의 관리 boundary key는 어떤 속도에서도 looped 재생 중 sampling되지 않는다. Scrubbing은 절대 위치라 영향받지 않는다. Field는 undo가 되쓰는 `PreviewState`가 아니라 `ShellState`에 두고 `reload_project()`의 단일 default로만 초기화한다. 직렬화·dirty·history·export·preference 어디에도 들어가지 않고 registry는 60 그대로다. |
 
 Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA component별 독립 curve는 P1에서도 만들지 않는다.
 
@@ -402,33 +404,33 @@ Wire easing은 segment 전체에 공용이므로 graph의 X/Y 또는 RGBA compon
 | --- | --- | --- |
 | MAR-175 | Unified manual weight authoring | brush와 agent의 중복 정규화를 하나의 domain primitive로 합친다. Replace brush, active-vertex numeric table, selected-scope Normalize와 setup-pose Rebind를 제공한다. |
 | MAR-176 | Deterministic auto weights | 명시적 candidate bone 체크 목록에서 setup-world vertex와 bone segment의 inverse-square distance로 상위 4개를 선택한다. Skeleton order로 tie-break하고 zero-length/isolated vertex는 nearest candidate로 fallback한다. |
-| MAR-177 | Constraint lifecycle schema | `.marrow.constraint_edits.operations`에 ordered rename/delete를 추가한다. Base-backed constraint는 operation/tombstone, project-only constraint는 upsert 직접 변경으로 표현한다. |
+| MAR-177 | Constraint lifecycle schema (완료, 2026-08-30) | `.marrow.constraint_edits.operations`에 ordered rename/delete를 추가했다. Base-backed constraint는 operation/tombstone, project-only constraint는 upsert 직접 변경, 둘을 겸하는 shadowing upsert는 **양쪽 모두**로 표현한다. Materialization은 root array와 모든 `skins[].<family>` 이름 배열을 함께 rewrite/prune하고, 비워진 family key는 `[]`로 남기지 않고 삭제한다. |
 | MAR-178 | Constraint rename/delete surfaces | IK/Path/Transform/Physics GUI·confirmation·undo·dry-run·agent/MCP를 추가하고 root arrays, `skins[].constraints`, upsert, `SelectionSet`을 원자적으로 cascade한다. |
 | MAR-179 | Complete constraint widgets | IK softness/compress/stretch와 Physics step/x/y/rotate/scaleX/shearX/limit/massInverse UI를 추가하고 IK MCP 누락 필드를 보완한다. |
 
-모든 weight 결과는 non-positive 제거, duplicate bone 병합, weight 내림차순+skeleton order 정렬, top-4 제한, 합계 1 정규화를 동일하게 적용한다.
+모든 weight 결과는 non-positive 제거, duplicate bone 병합, weight 내림차순+skeleton order 정렬, top-4 제한, 합계 1 정규화를 동일하게 적용한다. MAR-175부터 이 규칙은 `src/editor/mesh_weight_model.hpp`의 `canonicalize_mesh_weight_vertex()` 하나가 소유하며 brush·수치 편집·agent가 모두 그것을 호출한다.
 
 #### 파일·inherit 워크플로
 
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
-| MAR-180 | Atomic project I/O | 같은 디렉터리 temp+rename 저장, Save As 상대 asset/export/atlas-pack/PSD 경로 rebase, `EditorSession::create/close`와 atomic runtime-source adoption을 구현한다. |
-| MAR-181 | File path UI | 외부 의존성 없는 ImGui directory/path modal과 New/Open/Save/Save As를 연결한다. New는 skeleton·최소 한 atlas·대상 `.marrow` 경로를 검증한 뒤 dirty in-memory session으로 시작한다. |
-| MAR-182 | Dirty intent state machine | New/Open/Reload/Quit/OS close를 Save/Discard/Cancel로 통합한다. Save 실패나 Cancel은 현재 session과 pending intent를 유지한다. |
-| MAR-183 | Recent Projects | 성공한 New-save/Open/Save As만 canonical absolute path로 최대 10개 저장한다. 사라진 경로는 disabled로 남겨 Remove/Clear Missing을 제공한다. |
-| MAR-184 | Inherit overlay | runtime과 같은 5개 mode의 stepped-only inherit timeline project schema, materialization, merge/export primitive를 추가한다. |
-| MAR-185 | Inherit editing parity | Add/Edit/Remove, selection, retime, scale, clipboard, animation rename/delete cascade와 `set/remove_inherit_keyframe` agent/MCP를 연결한다. |
+| MAR-180 (완료, 2026-08-30) | Atomic project I/O | 같은 디렉터리 temp+rename 저장, Save As 상대 asset/export/atlas-pack 경로 rebase, `EditorSession::create`/`close`/`adopt_runtime_sources`를 구현했다. `write_atomically`는 `preferences.cpp`에서 복사가 아니라 **추출**해 `src/editor/atomic_file_write.{hpp,cpp}`로 옮겼고, 설정 writer와 project writer가 같은 primitive와 같은 rename test seam을 공유한다. Rebase 대상은 struct에서 직렬화되는 다섯 family(`runtime.skeleton`, `runtime.atlases[]`, `editor.export_directory`, `atlas_packs[].atlas`, `atlas_packs[].sprites[].image`)이며 empty·absolute 참조는 그대로 둔다. `export_directory`는 acceptance criterion의 문자 그대로 identity rebase라서 Save As 후에도 export는 원래 폴더로 간다 — 다른 선택지는 MAR-181의 UI 문제다. **PSD provenance 경로는 rebase하지 않는다**: `.marrow.editor.import_sources.psd`는 아직 schema에 없고 MAR-188 범위다. 대신 `rebase_project_paths`가 새 project-relative field를 등록하는 단일 지점이 되고 doc comment가 MAR-188을 지목한다. `fsync`는 명시적 non-goal이고, crash가 rename 직전에 나면 고아 `*.tmp.*` 하나가 남을 수 있다 — 처리된 실패는 모두 지운다. `.marrow` schema는 무변경. |
+| MAR-181 (완료, 2026-08-30) | File path UI | 외부 의존성 없는 ImGui path modal 두 개(공용 chooser `Choose Path##file_path`와 New 폼 `New Project##file_new`)와 File 메뉴 항목 넷, `Ctrl+S`를 연결했다. 네이티브 dialog를 쓰지 않은 것은 취향이 아니라 필요다: `SDL_ShowOpenFileDialog`는 `--auto-close` headless 하네스가 구동할 수 없어 acceptance criterion 전부가 검증 불가가 된다. New는 skeleton과 최소 한 atlas를 **실제로 로드해** 검증한 뒤 dirty in-memory session으로 시작하고 대상 파일은 **쓰지 않는다** — 명시적 Save 전까지 디스크에 존재하지 않는다. 세션을 교체하는 New/Open은 `Reload`와 같은 규율로 프레임 끝에 적용하고, 교체하지 않는 Save/Save As는 `save_project_file`처럼 즉시 적용한다. `reload_project`의 reset 블록은 `adopt_session_project_into_shell`로 **순수 추출**했으며 하드코딩된 `project_dirty = false`가 caller intent 파라미터가 됐다 — New는 MAR-180이 의도한 대로 dirty-from-birth로 남는다. `ShellState::project_path`와 `project()->source_path`는 성공 시 함께 움직이고 실패 시 **둘 다 움직이지 않는다**. dirty-session 확인은 **의도적으로 없다**(MAR-182 범위). `.marrow` schema 무변경 — 새 seam과 기존 seam의 key set이 56:56으로 동일함을 실측했다. registry 64 불변. |
+| MAR-182 (완료, 2026-08-30) | Dirty intent state machine | 작업을 버릴 수 있는 다섯 경로 — New/Open/Reload/Quit/네이티브 OS close — 앞에 Save/Discard/Cancel state machine 하나를 세웠다. 이야기 제목의 "통합"은 서로 다른 검사가 여럿 있었다는 뜻이지만 **실측 결과 검사는 0개**였다. 작업은 조정이 아니라 **구축**이다. Gate는 `EditorSession::dirty()`를 읽는다. 그것이 content-keyed(`serialize_project()` 결과와 마지막으로 읽거나 쓴 bytes의 비교)이기 때문이며, `ShellState::project_dirty`는 읽지도 쓰지도 않는다 — 그쪽은 caller가 넘긴 boolean에서 대입되는 display cache이고 refresh 지점 둘이 `shell_main.cpp`에만 있어, 그것을 gate로 쓰면 smoke와 출하 shell에서 의미가 달라진다. Save는 **원자적 저장이 성공한 뒤에만** intent를 완료시키고, 완료 조건 역시 `!session.dirty()`라는 content-keyed 조건이다. `save_project_file`의 반환값은 쓰지 않는다 — deferred Save As 분기에는 읽을 반환값이 없고, 즉시 분기에서도 authoring gesture 중에는 저장 없이 false를 돌려주기 때문이다. 저장 실패는 session과 intent를 유지하고 prompt를 다시 띄우며 **discard·교체·종료로 흘러가는 경로가 구조적으로 존재하지 않는다**: `perform_session_intent`의 호출 지점은 정확히 둘이고 둘 다 실패에서 도달 불가다. Cancel은 정의상 아무것도 하지 않고 `SessionSnapshot`이 bit 단위로 같으며, intent는 숨겨 두지 않고 **다시 표현 가능**하게만 남긴다. Discard는 저장을 거부할 뿐 되돌리거나 지우지 않으므로 New/Open/Reload에서는 원자적 교체가 착지하기 전까지 작업이 살아 있다 — 단어의 인상과 정반대이며 Quit에서만 즉시 손실이다. Reload는 `bool*` out-parameter 세 surface와 두 frame body의 손수 쓴 `if`를 버리고 `FileAction::Reload`로 기존 deferred rail에 합류했다 — frame body 로직의 **순삭제**이고 C11의 보호를 그대로 물려받는다. Quit은 메뉴 항목에서 곧장 gate로 들어간다. 예전 자리인 `shell_main.cpp`는 반환값을 버리는 쌍둥이 frame body를 갖고 있어 거기 둔 gate는 어떤 테스트에도 보이지 않기 때문이며, 그래서 `ProjectMenuAction` enum 자체를 삭제했다. Veto가 실제로 동작하도록 `ShellState::should_exit`가 main loop의 **유일한** 종료 조건이 되고 `EditorWindowHost::request_close()`는 **삭제**했다 — 구현체가 하나뿐이라 compiler가 강제한다. 막을 수 없는 prompt는 없느니만 못하다. Prompt의 Save는 목적지가 없으면 Save As로 재귀하므로 공용 chooser에 도달하고, 그곳의 압도적 다수 경우는 **이미 존재하는 파일 위에 쓰는 것**이다. 따라서 `resolve_choice`의 수용 규칙에 의존한다. `Choose`는 `FilePathChoice::acceptable` 하나로만 gate되고 존재하는 Save 대상은 `"Replaces the existing file."` diagnostic을 **가진 채로 수용**된다. diagnostic이 비어 있는지로 gate하면 바로 그 흔한 경우에 `Choose`가 비활성화되어 `AwaitingSave`에 출구가 없어지고 prompt를 해소할 수 없게 된다. MAR-182는 `resolve_choice`를 건드리지 않으며 C15 half B가 두 조건을 동시에 확인한다. `.marrow` schema, `.mskl` v1, `.mbin` v2, C ABI v1, registry 64 모두 무변경. |
+| MAR-183 (완료, 2026-08-30) | Recent Projects | 성공한 Open·Save As·New 세션의 **첫** 저장만 canonical absolute path로 최대 `kRecentProjectLimit`(10)개 기록한다. 저장 계층은 MAR-156부터 settings **v1 안에** 이미 있었고 reader·writer가 하나도 없었을 뿐이라, 이 이야기는 parse·serialize·version bump를 **추가하지 않는다** — `kEditorSettingsVersion`은 1 그대로다. 연산은 `erase-equal → insert-front → truncate`이며 **insert가 truncate보다 먼저**다(뒤집으면 bound에 정확히 걸린 순간 방금 연 항목이 잘린다). 동일성은 `weakly_canonical` 결과의 byte 비교이고 우리 쪽 case folding은 없다 — `resolve_choice`가 이미 출하한 규칙이다. macOS 귀결은 실측 결과 설계 문서와 반대로, **존재하는** 파일의 두 대소문자 표기는 디스크 표기로 수렴해 합쳐지고 **없는** 파일의 표기만 둘로 남는다. New의 첫 저장은 문서 속성으로 구분되지 않으므로 `ShellState::pending_recent_on_first_save`(optional path)가 판별자다 — `create`만 세우고 그 경로를 실제로 쓴 저장만 소비하므로, 세션을 옮긴 Save As가 팔을 잘못 소비할 수 없다. **자동 정리는 load·그리기·클릭 어디에서도 하지 않는다**: 존재 여부는 submenu가 열린 동안 매 프레임 읽어 cache도 무효화 규칙도 없고, 다시 mount된 볼륨은 스스로 되살아난다. load에서 정리한다는 것은 load에서 쓴다는 뜻이고 그러면 잠깐 unmount된 볼륨 하나로 북마크가 영구히 사라지므로 **loading은 결코 쓰지 않는다**. Recent 열기는 `begin_session_intent(SessionIntent::Open, path)` 한 줄이 전부라 MAR-182 gate를 우회하지 않으며, `DirtyIntentRequest`가 얻은 `path`는 retarget에서 `intent`와 **함께 무조건** 대입된다. 사라진 항목은 보이되 비활성이고, 비활성 행은 클릭도 우클릭도 받지 않으므로 언제나 활성인 `Remove` submenu와 `Clear Missing`이 제거 수단이다. `.marrow` schema, C ABI v1, registry 64 모두 무변경. |
+| MAR-184 (완료, 2026-09-01) | Inherit overlay | runtime과 같은 5개 mode의 stepped-only inherit timeline project schema, materialization, merge/export primitive를 추가한다. |
+| MAR-185 (완료, 2026-09-01) | Inherit editing parity | Add/Edit/Remove, selection, retime, scale, clipboard, animation rename/delete cascade와 `set/remove_inherit_keyframe` agent/MCP를 연결한다. |
 
 #### Problems·PSD 재임포트·완료 검증
 
 | Story | Title | 수직 슬라이스 |
 | --- | --- | --- |
-| MAR-186 | Structured diagnostics | stable code/severity/message/typed target/safe-fix ID collector를 만든다. `project.diagnostics`의 기존 summary를 보존하며 `issues`와 count를 추가한다. |
-| MAR-187 | Problems view | severity grouping/filter, target selection·panel focus, revision refresh와 allowlist safe fix를 제공한다. Inspection은 무변경이고 fix만 transaction+undo를 쓴다. |
-| MAR-188 | PSD reimport planning | `.marrow.editor.import_sources.psd`에 project-relative provenance와 layer mapping을 저장하고 exact name/group 기반 added/updated/missing staging diff를 계산한다. Rename은 추론하지 않는다. |
-| MAR-189 | Atomic PSD commit | 현재 overlay까지 staged bundle로 검증하고 layer directory/texture/atlas/skeleton을 journaled rename으로 교체한다. 모든 단계 rollback과 승인 agent import의 실제 경로 사용을 검증한다. |
-| MAR-190 | PSD reimport GUI | preview/confirmation과 missing-layer checklist를 연결한다. Missing은 기본 보존하고 명시 선택만 삭제하며 성공 시 unsaved overlay/history를 유지한 채 runtime source를 교체한다. |
-| MAR-191 | P1 E2E and docs | P1 상호작용, JSON/MBIN export, GUI/agent registry parity, save/reload, failpoint rollback을 종합 검증하고 roadmap·문서·AGENTS 명령을 최종 동기화한다. |
+| MAR-186 (완료, 2026-09-01) | Structured diagnostics | stable code/severity/message/typed target/safe-fix ID collector를 만든다. `project.diagnostics`의 기존 summary를 보존하며 `issues`와 count를 추가한다. |
+| MAR-187 (완료, 2026-09-01) | Problems view | severity grouping/filter, target selection·panel focus, revision refresh와 allowlist safe fix를 제공한다. Inspection은 무변경이고 fix만 transaction+undo를 쓴다. |
+| MAR-188 (완료, 2026-09-01) | PSD reimport planning | 이 field를 추가할 때 `rebase_project_paths`(`project.cpp`)에 여섯 번째 family로 등록해야 Save As가 따라간다 — MAR-180이 그 자리를 doc comment로 표시해 뒀다. `.marrow.editor.import_sources.psd`에 project-relative provenance와 layer mapping을 저장하고 exact name/group 기반 added/updated/missing staging diff를 계산한다. Rename은 추론하지 않는다. |
+| MAR-189 (완료, 2026-09-01) | Atomic PSD commit | 현재 overlay까지 staged bundle로 검증하고 layer directory/texture/atlas/skeleton을 journaled rename으로 교체한다. 모든 단계 rollback과 승인 agent import의 실제 경로 사용을 검증한다. |
+| MAR-190 (완료, 2026-09-02) | PSD reimport GUI | preview/confirmation과 missing-layer checklist를 연결한다. Missing은 기본 보존하고 명시 선택만 삭제하며 성공 시 unsaved overlay/history를 유지한 채 runtime source를 교체한다. |
+| MAR-191 (완료, 2026-09-02) | P1 E2E and docs | P1 상호작용, JSON/MBIN export, GUI/agent registry parity, save/reload, failpoint rollback을 종합 검증하고 roadmap·문서·AGENTS 명령을 최종 동기화한다. |
 
 Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical normalize, stale preview reference reset만 포함한다.
 정상적으로 열린 session만 진단하며 최초 open 실패의 partial/degraded loading이나 자동 수정은 제외한다.
@@ -436,7 +438,7 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 #### P1 검증 기준
 
 - **Runtime unit**: explicit/inferred/empty duration, loop·queue·reverse·snapshot, curve flat/overshoot/auto tangent, auto-weight determinism.
-- **Project smoke**: 모든 신규 optional schema의 old-project compatibility, constraint rename/delete cascade, inherit/curve metadata, Save As path rebase, JSON↔MBIN equivalence.
+- **Project smoke**: 모든 신규 optional schema의 old-project compatibility, constraint rename/delete cascade(MAR-177 완료), inherit/curve metadata, Save As path rebase, JSON↔MBIN equivalence.
 - **Selection unit/shell smoke**: typed identity scope, stable order와 active fallback, prune/remap collision, invalid-range atomicity, transient project/preview/runtime/history/revision invariants.
 - **Shell smoke**: transformed/reflected/singular gizmo, signed/zero scale, weighted/unweighted/linked FFD, multi-select, snap tie-break, graph point/handle cancel, dirty modal, Problems navigation.
 - **Agent/MCP smoke**: 신규 operation metadata·dry-run·mutation·undo·export preview와 C++/Python registry parity.
@@ -450,13 +452,13 @@ Problems safe-fix 최초 allowlist는 orphan overlay 제거, weight canonical no
 
 ### 참고: 에이전트(MCP) 표면과의 비대칭
 
-에이전트 표면은 MAR-155 duration operation을 포함해 현재 56 ops다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
+에이전트 표면은 MAR-155 duration, MAR-169 `timeline.set_interpolation`, MAR-171 `timeline.set_curve_mode`, MAR-172 `timeline.set_loop_sync`, MAR-173 `timeline.scale_key_times`, MAR-175 `mesh.rebind_weights`, MAR-176 `mesh.generate_weights`와 MAR-178 `constraint.rename`/`constraint.delete`와 MAR-185 `set_inherit_keyframe`/`remove_inherit_keyframe` operation을 포함해 현재 66 ops다. MAR-170은 operation을 추가하지 않고 그 operation의 `interpolation` 인자에 preset token 4개만 더했다. P0의 animation CRUD와 atomic timeline retime에 더해 MAR-128의
 `parameters.list`, `parameter.set`, `deformer.create`, `keyform.capture`, `expression.create`, `lip_sync.map`을
 C++ registry와 Python MCP 도구에 함께 노출했다. Transform/slot/parameter authoring은 GUI와 agent가 base materialization
 또는 candidate runtime build를 포함한 UI-free mutation을 공유한다. GUI는 의도적으로 더 넓은 parameter/group/shape lifecycle과
 warp lattice·rotation pivot gesture를 제공하며, agent는 계획에 확정된 inspection 1개와 mutation 5개만 제공한다.
 
-P1의 **지속 mutation**인 duration, interpolation/curve mode/loop sync, time scaling, weight bind/auto-weight,
+P1의 **지속 mutation**인 duration, interpolation/curve mode/loop sync, time scaling, weight bind/auto-weight(MAR-175·MAR-176 완료),
 constraint lifecycle, inherit key, PSD reimport는 C++ operation registry와 Python MCP에 동시에 노출한다. 순수 selection,
 graph 표시, file dialog, transient playback speed는 agent operation 대상이 아니다. GUI와 agent가 함께 제공되는 mutation은
 같은 UI-free domain primitive, dry-run, undo/export-preview 경계를 공유한다.

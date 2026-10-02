@@ -1,9 +1,14 @@
 #include "agent_dispatch_internal.hpp"
+#include "mesh_weight_model.hpp"
 
+#include "timeline_model.hpp"
 #include "marrow/editor/authoring.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -33,6 +38,246 @@ json::Value animation_duration_value(
             number_value(*animation.explicit_duration));
     }
     return object_value(std::move(payload));
+}
+
+std::string transform_channel_name(TransformTimelineChannel channel) {
+    switch (channel) {
+    case TransformTimelineChannel::Rotate: return "rotate";
+    case TransformTimelineChannel::Translate: return "translate";
+    case TransformTimelineChannel::Scale: return "scale";
+    case TransformTimelineChannel::Shear: return "shear";
+    }
+    return "rotate";
+}
+
+std::string timeline_key_kind_name(TimelineKeyKind kind) {
+    switch (kind) {
+    case TimelineKeyKind::Transform: return "transform";
+    case TimelineKeyKind::Deform: return "deform";
+    case TimelineKeyKind::DrawOrder: return "draw_order";
+    case TimelineKeyKind::Event: return "event";
+    case TimelineKeyKind::SlotColor: return "slot_color";
+    case TimelineKeyKind::SlotAttachment: return "slot_attachment";
+    case TimelineKeyKind::Inherit: return "inherit";
+    }
+    return "transform";
+}
+
+/** @brief Encodes an easing exactly as the `.marrow`/`.mskl` `curve` field. */
+json::Value interpolation_curve_value(const runtime::Interpolation& interpolation) {
+    switch (interpolation.kind()) {
+    case runtime::InterpolationKind::Linear:
+        return string_value("linear");
+    case runtime::InterpolationKind::Stepped:
+        return string_value("stepped");
+    case runtime::InterpolationKind::CubicBezier: {
+        const auto& points = interpolation.cubic_bezier();
+        json::Value::Array control_points;
+        control_points.reserve(4U);
+        control_points.push_back(number_value(static_cast<double>(points.cx1)));
+        control_points.push_back(number_value(static_cast<double>(points.cy1)));
+        control_points.push_back(number_value(static_cast<double>(points.cx2)));
+        control_points.push_back(number_value(static_cast<double>(points.cy2)));
+        return array_value(std::move(control_points));
+    }
+    }
+    return string_value("linear");
+}
+
+json::Value interpolation_request_value(
+    runtime::InterpolationKind kind,
+    const std::array<double, 4>& control_points) {
+    switch (kind) {
+    case runtime::InterpolationKind::Linear:
+        return string_value("linear");
+    case runtime::InterpolationKind::Stepped:
+        return string_value("stepped");
+    case runtime::InterpolationKind::CubicBezier: {
+        json::Value::Array points;
+        points.reserve(4U);
+        for (const double value : control_points) {
+            points.push_back(number_value(value));
+        }
+        return array_value(std::move(points));
+    }
+    }
+    return string_value("linear");
+}
+
+/**
+ * @brief Reads the stored easing of one selected key, or null when the key
+ *        does not resolve in `project`.
+ */
+json::Value timeline_key_curve_value(
+    const ProjectData& project,
+    const TimelineKeySelector& selector) {
+    const auto matching = [&](const auto& keyframes) -> const auto* {
+        for (const auto& keyframe : keyframes) {
+            if (std::abs(keyframe.time - selector.time) <= kKeyTimeEpsilon) {
+                return &keyframe;
+            }
+        }
+        return decltype(&keyframes.front()){nullptr};
+    };
+    switch (selector.kind) {
+    case TimelineKeyKind::Transform: {
+        const auto* edit = project.find_transform_timeline_edit(
+            selector.animation_name, selector.bone_name, selector.transform_channel);
+        if (edit == nullptr || edit->keyframes.empty()) break;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return interpolation_curve_value(keyframe->interpolation);
+        }
+        break;
+    }
+    case TimelineKeyKind::Deform: {
+        const auto* edit = project.find_mesh_deform_timeline_edit(
+            selector.animation_name, selector.slot_name, selector.attachment_name);
+        if (edit == nullptr || edit->keyframes.empty()) break;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return interpolation_curve_value(keyframe->interpolation);
+        }
+        break;
+    }
+    case TimelineKeyKind::SlotColor: {
+        const auto* edit = project.find_slot_color_timeline_edit(
+            selector.animation_name, selector.slot_name);
+        if (edit == nullptr || edit->keyframes.empty()) break;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return interpolation_curve_value(keyframe->interpolation);
+        }
+        break;
+    }
+    case TimelineKeyKind::DrawOrder:
+    case TimelineKeyKind::Event:
+    case TimelineKeyKind::SlotAttachment:
+    // MAR-185: `InheritKeyframeEdit` has no `interpolation` member.
+    case TimelineKeyKind::Inherit:
+        break;
+    }
+    return json::Value{};
+}
+
+/**
+ * @brief The recorded curve mode and driver of one key, for the Agent echo.
+ *
+ * Only Transform and Slot Color keys carry curve intent; every other family
+ * reports nothing at all, which is what makes `previous_mode` absent rather
+ * than a guessed "manual" for a key that could never have one.
+ */
+std::optional<std::pair<
+    marrow::editor::TimelineCurveMode,
+    marrow::editor::TimelineScalarComponent>>
+timeline_key_curve_intent(
+    const ProjectData& project,
+    const TimelineKeySelector& selector) {
+    const auto matching = [&](const auto& keyframes) -> const auto* {
+        for (const auto& keyframe : keyframes) {
+            if (std::abs(keyframe.time - selector.time) <= kKeyTimeEpsilon) {
+                return &keyframe;
+            }
+        }
+        return decltype(&keyframes.front()){nullptr};
+    };
+    if (selector.kind == TimelineKeyKind::Transform) {
+        const auto* edit = project.find_transform_timeline_edit(
+            selector.animation_name, selector.bone_name, selector.transform_channel);
+        if (edit == nullptr || edit->keyframes.empty()) return std::nullopt;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return std::make_pair(keyframe->curve_mode, keyframe->curve_driver);
+        }
+        return std::nullopt;
+    }
+    if (selector.kind == TimelineKeyKind::SlotColor) {
+        const auto* edit = project.find_slot_color_timeline_edit(
+            selector.animation_name, selector.slot_name);
+        if (edit == nullptr || edit->keyframes.empty()) return std::nullopt;
+        if (const auto* keyframe = matching(edit->keyframes)) {
+            return std::make_pair(keyframe->curve_mode, keyframe->curve_driver);
+        }
+    }
+    return std::nullopt;
+}
+
+/**
+ * @brief Recomputes every automatic curve of the project inside `transaction`.
+ *
+ * MAR-171: a scripted call is not in a per-frame loop, so the Agent resolves
+ * the whole project rather than one animation. A failure cancels the caller's
+ * transaction, rolling back its own mutation too, because a partially resolved
+ * project is exactly the staleness automatic curves exist to remove.
+ * @return an error string when the resolve failed; empty on success.
+ */
+std::string resolve_agent_auto_curves(ProjectData* project) {
+    const marrow::editor::TimelineAutoCurveResult result =
+        marrow::editor::resolve_automatic_curves(project, {});
+    return result ? std::string() : result.error;
+}
+
+bool same_curve_value(const json::Value& left, const json::Value& right) {
+    if (left.is_string() && right.is_string()) {
+        return left.as_string() == right.as_string();
+    }
+    if (left.is_array() && right.is_array()) {
+        if (left.as_array().size() != right.as_array().size()) return false;
+        for (std::size_t index = 0U; index < left.as_array().size(); ++index) {
+            const json::Value& first = left.as_array()[index];
+            const json::Value& second = right.as_array()[index];
+            if (!first.is_number() || !second.is_number() ||
+                first.as_number() != second.as_number()) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return left.is_null() && right.is_null();
+}
+
+/**
+ * @brief Splits primitive rejections into "the key is not there" and
+ *        "the request was malformed", matching timeline.retime_keyframes.
+ */
+/**
+ * @brief The Agent's rejection for a write or removal on a derived key.
+ *
+ * A managed boundary key's value and easing are copies of the key at time zero,
+ * so writing one would be reverted by the synchronization in the same
+ * transaction -- the "the command appears to do nothing and nothing explains
+ * why" outcome -- and removing one would leave the lane without the key its
+ * opt-in asserts. The GUI skips such a key and reports the skip because a
+ * dopesheet box selection routinely spans it; a scripted selector list does not,
+ * so the Agent rejects atomically and names the remedy.
+ */
+std::string managed_loop_boundary_rejection(
+    const ProjectData& project,
+    const runtime::SkeletonData& skeleton,
+    const TimelineKeySelector& selector) {
+    if (!marrow::editor::timeline_key_is_managed_loop_boundary(
+            project, skeleton, selector)) {
+        return {};
+    }
+    return "That key is a managed loop boundary; edit the key at time 0 of the "
+           "same timeline instead, or disable loop synchronization on that "
+           "timeline.";
+}
+
+/** @brief The same rejection for a whole selector list, first hit wins. */
+std::string managed_loop_boundary_rejection(
+    const ProjectData& project,
+    const runtime::SkeletonData& skeleton,
+    const std::vector<TimelineKeySelector>& selectors) {
+    for (const TimelineKeySelector& selector : selectors) {
+        std::string rejection =
+            managed_loop_boundary_rejection(project, skeleton, selector);
+        if (!rejection.empty()) {
+            return rejection;
+        }
+    }
+    return {};
+}
+
+std::string_view classify_timeline_key_error(std::string_view error) {
+    return error.find("not found") != std::string_view::npos ? "not_found"
+                                                             : "invalid_request";
 }
 
 } // namespace
@@ -287,6 +532,16 @@ AgentDispatchResult handle_editing_operation(
             transaction.cancel();
             return make_error("No changes made.", op, spec, "no_change");
         }
+        // MAR-171: a duration change moves no key today, so this resolves
+        // nothing (§18.3 asserts it). The seam is wired because criterion 3
+        // names duration and because MAR-172's managed boundary key will live
+        // at `duration`.
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -366,6 +621,20 @@ AgentDispatchResult handle_editing_operation(
                 "not_found");
         }
 
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Transform;
+            selector.animation_name = std::string(*anim_name);
+            selector.bone_name = std::string(*bone_name);
+            selector.transform_channel = channel;
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    *session.project(), skeleton, selector);
+                !rejection.empty()) {
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
+
         if (bool_arg(args, "dry_run")) {
             json::Value::Object preview;
             preview.emplace("dry_run", bool_value(true));
@@ -424,6 +693,12 @@ AgentDispatchResult handle_editing_operation(
             *time,
             patch);
 
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -488,8 +763,28 @@ AgentDispatchResult handle_editing_operation(
         if (key_it == edit->keyframes.end()) {
             return make_error("Keyframe not found at that time.", op, spec, "not_found");
         }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Transform;
+            selector.animation_name = std::string(*anim_name);
+            selector.bone_name = std::string(*bone_name);
+            selector.transform_channel = channel;
+            selector.time = key_it->time;
+            if (const std::string rejection =
+                    managed_loop_boundary_rejection(project, skeleton, selector);
+                !rejection.empty()) {
+                transaction.cancel();
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         edit->keyframes.erase(key_it);
 
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -501,6 +796,112 @@ AgentDispatchResult handle_editing_operation(
     }
 
     return handle_timeline_editing_operation(context, cmd, operation);
+}
+
+bool timeline_key_selectors_arg(
+    const json::Value& keys_value,
+    std::string_view operation_label,
+    std::string_view family_noun,
+    std::vector<TimelineKeySelector>* selectors_out,
+    std::string* error_out) {
+    selectors_out->clear();
+    selectors_out->reserve(keys_value.as_array().size());
+    for (std::size_t index = 0U; index < keys_value.as_array().size(); ++index) {
+        const json::Value& key_value = keys_value.as_array()[index];
+        if (!key_value.is_object()) {
+            *error_out = std::string(operation_label) + " key " + std::to_string(index) +
+                    " must be an object.";
+            return false;
+        }
+        const auto kind = string_arg_any(key_value, {"kind", "type"});
+        const auto animation = string_arg(key_value, "animation");
+        const auto time = number_arg(key_value, "time");
+        if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
+            *error_out = std::string(operation_label) + " key " + std::to_string(index) +
+                    " requires kind, animation, and time.";
+            return false;
+        }
+
+        TimelineKeySelector selector;
+        selector.animation_name = std::string(*animation);
+        selector.time = *time;
+        if (*kind == "transform") {
+            const auto bone = string_arg(key_value, "bone");
+            const auto channel = string_arg(key_value, "channel");
+            if (!bone.has_value() || !channel.has_value()) {
+                *error_out = "Transform " + std::string(family_noun) + " keys require bone and channel.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::Transform;
+            selector.bone_name = std::string(*bone);
+            if (*channel == "rotate") {
+                selector.transform_channel = TransformTimelineChannel::Rotate;
+            } else if (*channel == "translate") {
+                selector.transform_channel = TransformTimelineChannel::Translate;
+            } else if (*channel == "scale") {
+                selector.transform_channel = TransformTimelineChannel::Scale;
+            } else if (*channel == "shear") {
+                selector.transform_channel = TransformTimelineChannel::Shear;
+            } else {
+                *error_out = "Transform " + std::string(family_noun) +
+                    " channel must be rotate, translate, scale, or shear.";
+                return false;
+            }
+        } else if (*kind == "deform") {
+            const auto slot = string_arg(key_value, "slot");
+            const auto attachment = string_arg(key_value, "attachment");
+            if (!slot.has_value() || !attachment.has_value()) {
+                *error_out = "Deform " + std::string(family_noun) + " keys require slot and attachment.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::Deform;
+            selector.slot_name = std::string(*slot);
+            selector.attachment_name = std::string(*attachment);
+        } else if (*kind == "draw_order") {
+            selector.kind = TimelineKeyKind::DrawOrder;
+        } else if (*kind == "event") {
+            selector.kind = TimelineKeyKind::Event;
+            if (const auto ordinal = integer_arg(key_value, "ordinal")) {
+                if (*ordinal < 0) {
+                    *error_out = "Event " + std::string(family_noun) + " ordinal must be non-negative.";
+                    return false;
+                }
+                selector.same_time_ordinal = static_cast<std::size_t>(*ordinal);
+            }
+        } else if (*kind == "slot_color") {
+            const auto slot = string_arg(key_value, "slot");
+            if (!slot.has_value()) {
+                *error_out = "Slot-color " + std::string(family_noun) + " keys require slot.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::SlotColor;
+            selector.slot_name = std::string(*slot);
+        } else if (*kind == "slot_attachment") {
+            const auto slot = string_arg(key_value, "slot");
+            if (!slot.has_value()) {
+                *error_out = "Slot-attachment " + std::string(family_noun) + " keys require slot.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::SlotAttachment;
+            selector.slot_name = std::string(*slot);
+        } else if (*kind == "inherit") {
+            // MAR-185. An if/else chain: the compiler says nothing about a
+            // missing branch here, and its absence would land on the final
+            // `else` below and reject every inherit key by name.
+            const auto bone = string_arg(key_value, "bone");
+            if (!bone.has_value()) {
+                *error_out = "Inherit " + std::string(family_noun) + " keys require bone.";
+                return false;
+            }
+            selector.kind = TimelineKeyKind::Inherit;
+            selector.bone_name = std::string(*bone);
+        } else {
+            *error_out = "Unknown timeline " + std::string(family_noun) + " key kind: " + std::string(*kind);
+            return false;
+        }
+        selectors_out->push_back(std::move(selector));
+    }
+    return true;
 }
 
 AgentDispatchResult handle_timeline_editing_operation(
@@ -534,94 +935,14 @@ AgentDispatchResult handle_timeline_editing_operation(
         }
 
         std::vector<TimelineKeySelector> selectors;
-        selectors.reserve(keys_value->as_array().size());
-        for (std::size_t index = 0U; index < keys_value->as_array().size(); ++index) {
-            const json::Value& key_value = keys_value->as_array()[index];
-            if (!key_value.is_object()) {
-                return make_error(
-                    "timeline.retime_keyframes key " + std::to_string(index) +
-                        " must be an object.",
-                    op,
-                    spec);
-            }
-            const auto kind = string_arg_any(key_value, {"kind", "type"});
-            const auto animation = string_arg(key_value, "animation");
-            const auto time = number_arg(key_value, "time");
-            if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
-                return make_error(
-                    "timeline.retime_keyframes key " + std::to_string(index) +
-                        " requires kind, animation, and time.",
-                    op,
-                    spec);
-            }
-
-            TimelineKeySelector selector;
-            selector.animation_name = std::string(*animation);
-            selector.time = *time;
-            if (*kind == "transform") {
-                const auto bone = string_arg(key_value, "bone");
-                const auto channel = string_arg(key_value, "channel");
-                if (!bone.has_value() || !channel.has_value()) {
-                    return make_error(
-                        "Transform retime keys require bone and channel.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::Transform;
-                selector.bone_name = std::string(*bone);
-                if (*channel == "rotate") {
-                    selector.transform_channel = TransformTimelineChannel::Rotate;
-                } else if (*channel == "translate") {
-                    selector.transform_channel = TransformTimelineChannel::Translate;
-                } else if (*channel == "scale") {
-                    selector.transform_channel = TransformTimelineChannel::Scale;
-                } else if (*channel == "shear") {
-                    selector.transform_channel = TransformTimelineChannel::Shear;
-                } else {
-                    return make_error(
-                        "Transform retime channel must be rotate, translate, scale, or shear.",
-                        op,
-                        spec);
-                }
-            } else if (*kind == "deform") {
-                const auto slot = string_arg(key_value, "slot");
-                const auto attachment = string_arg(key_value, "attachment");
-                if (!slot.has_value() || !attachment.has_value()) {
-                    return make_error(
-                        "Deform retime keys require slot and attachment.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::Deform;
-                selector.slot_name = std::string(*slot);
-                selector.attachment_name = std::string(*attachment);
-            } else if (*kind == "draw_order") {
-                selector.kind = TimelineKeyKind::DrawOrder;
-            } else if (*kind == "event") {
-                selector.kind = TimelineKeyKind::Event;
-                if (const auto ordinal = integer_arg(key_value, "ordinal")) {
-                    if (*ordinal < 0) {
-                        return make_error(
-                            "Event retime ordinal must be non-negative.", op, spec);
-                    }
-                    selector.same_time_ordinal = static_cast<std::size_t>(*ordinal);
-                }
-            } else if (*kind == "slot_color") {
-                const auto slot = string_arg(key_value, "slot");
-                if (!slot.has_value()) {
-                    return make_error("Slot-color retime keys require slot.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::SlotColor;
-                selector.slot_name = std::string(*slot);
-            } else if (*kind == "slot_attachment") {
-                const auto slot = string_arg(key_value, "slot");
-                if (!slot.has_value()) {
-                    return make_error(
-                        "Slot-attachment retime keys require slot.", op, spec);
-                }
-                selector.kind = TimelineKeyKind::SlotAttachment;
-                selector.slot_name = std::string(*slot);
-            } else {
-                return make_error(
-                    "Unknown timeline retime key kind: " + std::string(*kind), op, spec);
-            }
-            selectors.push_back(std::move(selector));
+        std::string selector_error;
+        if (!timeline_key_selectors_arg(
+                *keys_value,
+                "timeline.retime_keyframes",
+                "retime",
+                &selectors,
+                &selector_error)) {
+            return make_error(std::move(selector_error), op, spec);
         }
 
         const bool snap = bool_arg(args, "snap", true);
@@ -669,6 +990,17 @@ AgentDispatchResult handle_timeline_editing_operation(
                         selector.animation_name,
                         selector.slot_name);
                     break;
+                // MAR-185. Silently wrong without this arm: the inherit edit is
+                // never materialized, so `resolve_timeline_key` finds no
+                // timeline and the whole retime rejects with "Persisted inherit
+                // key not found" even for a key the lane really has.
+                case TimelineKeyKind::Inherit:
+                    (void)ensure_bone_inherit_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name);
+                    break;
                 }
             }
             return retime_keyframes(
@@ -715,6 +1047,12 @@ AgentDispatchResult handle_timeline_editing_operation(
             transaction.cancel();
             return make_error("No changes made.", op, spec, "no_change");
         }
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto commit = commit_or_error(
                 transaction,
                 op,
@@ -724,6 +1062,1178 @@ AgentDispatchResult handle_timeline_editing_operation(
         }
         return make_success(
             "Retimed timeline keys successfully.",
+            op,
+            spec,
+            response_delta(result, false));
+    }
+
+    if (op == "timeline.set_interpolation") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.set_interpolation requires an 'args' object.", op, spec);
+        }
+        const json::Value* keys_value = json::find_member(*args, "keys");
+        if (keys_value == nullptr || !keys_value->is_array() ||
+            keys_value->as_array().empty()) {
+            return make_error(
+                "timeline.set_interpolation requires a non-empty keys(array).",
+                op,
+                spec);
+        }
+        if (keys_value->as_array().size() > 4096U) {
+            return make_error(
+                "timeline.set_interpolation accepts at most 4096 keys.", op, spec);
+        }
+
+        std::vector<TimelineKeySelector> selectors;
+        selectors.reserve(keys_value->as_array().size());
+        for (std::size_t index = 0U; index < keys_value->as_array().size(); ++index) {
+            const json::Value& key_value = keys_value->as_array()[index];
+            if (!key_value.is_object()) {
+                return make_error(
+                    "timeline.set_interpolation key " + std::to_string(index) +
+                        " must be an object.",
+                    op,
+                    spec);
+            }
+            const auto kind = string_arg_any(key_value, {"kind", "type"});
+            const auto animation = string_arg(key_value, "animation");
+            const auto time = number_arg(key_value, "time");
+            if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
+                return make_error(
+                    "timeline.set_interpolation key " + std::to_string(index) +
+                        " requires kind, animation, and time.",
+                    op,
+                    spec);
+            }
+
+            TimelineKeySelector selector;
+            selector.animation_name = std::string(*animation);
+            selector.time = *time;
+            if (*kind == "transform") {
+                const auto bone = string_arg(key_value, "bone");
+                const auto channel = string_arg(key_value, "channel");
+                if (!bone.has_value() || !channel.has_value()) {
+                    return make_error(
+                        "Transform easing keys require bone and channel.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::Transform;
+                selector.bone_name = std::string(*bone);
+                if (*channel == "rotate") {
+                    selector.transform_channel = TransformTimelineChannel::Rotate;
+                } else if (*channel == "translate") {
+                    selector.transform_channel = TransformTimelineChannel::Translate;
+                } else if (*channel == "scale") {
+                    selector.transform_channel = TransformTimelineChannel::Scale;
+                } else if (*channel == "shear") {
+                    selector.transform_channel = TransformTimelineChannel::Shear;
+                } else {
+                    return make_error(
+                        "Transform easing channel must be rotate, translate, scale, or shear.",
+                        op,
+                        spec);
+                }
+            } else if (*kind == "deform") {
+                const auto slot = string_arg(key_value, "slot");
+                const auto attachment = string_arg(key_value, "attachment");
+                if (!slot.has_value() || !attachment.has_value()) {
+                    return make_error(
+                        "Deform easing keys require slot and attachment.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::Deform;
+                selector.slot_name = std::string(*slot);
+                selector.attachment_name = std::string(*attachment);
+            } else if (*kind == "slot_color") {
+                const auto slot = string_arg(key_value, "slot");
+                if (!slot.has_value()) {
+                    return make_error("Slot-colour easing keys require slot.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::SlotColor;
+                selector.slot_name = std::string(*slot);
+            } else if (*kind == "draw_order" || *kind == "event" ||
+                       *kind == "slot_attachment" || *kind == "inherit") {
+                // These families carry no `interpolation` field at all.
+                // MAR-185 adds `inherit` HERE rather than leaving it to the
+                // final `else`: once inherit is a real kind, "Unknown timeline
+                // easing key kind" is a false statement about the vocabulary.
+                return make_error(
+                    "timeline.set_interpolation does not support " +
+                        std::string(*kind) + " keys.",
+                    op,
+                    spec);
+            } else {
+                return make_error(
+                    "Unknown timeline easing key kind: " + std::string(*kind), op, spec);
+            }
+            selectors.push_back(std::move(selector));
+        }
+
+        marrow::runtime::InterpolationKind requested_kind =
+            marrow::runtime::InterpolationKind::Linear;
+        std::array<double, 4> requested_points{0.0, 0.0, 1.0, 1.0};
+        std::string interpolation_error;
+        if (!interpolation_request_arg(
+                *args,
+                "interpolation",
+                &requested_kind,
+                &requested_points,
+                &interpolation_error)) {
+            return make_error(interpolation_error, op, spec);
+        }
+
+        // MAR-172: a managed boundary key's easing is a copy of key 0's, so
+        // writing it here would be reverted by the synchronization in the same
+        // transaction. Reject before anything is materialized.
+        if (const std::string rejection = managed_loop_boundary_rejection(
+                *session.project(), skeleton, selectors);
+            !rejection.empty()) {
+            return make_error(rejection, op, spec, "invalid_request");
+        }
+        const auto materialize = [&](ProjectData* project) {
+            for (const TimelineKeySelector& selector : selectors) {
+                switch (selector.kind) {
+                case TimelineKeyKind::Transform:
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name,
+                        selector.transform_channel);
+                    break;
+                case TimelineKeyKind::Deform:
+                    (void)ensure_mesh_deform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name,
+                        selector.attachment_name);
+                    break;
+                case TimelineKeyKind::SlotColor:
+                    (void)ensure_slot_color_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name);
+                    break;
+                case TimelineKeyKind::DrawOrder:
+                case TimelineKeyKind::Event:
+                case TimelineKeyKind::SlotAttachment:
+                // MAR-185: unreachable -- the parser above rejects `inherit`
+                // before a selector of this kind can reach here.
+                case TimelineKeyKind::Inherit:
+                    break;
+                }
+            }
+        };
+        // Previous curves are read from the materialized candidate, so a
+        // runtime-only track reports its runtime curve instead of "not found".
+        const auto collect_previous = [&](const ProjectData& project) {
+            std::vector<json::Value> curves;
+            curves.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                curves.push_back(timeline_key_curve_value(project, selector));
+            }
+            return curves;
+        };
+        const auto apply = [&](ProjectData* project) {
+            materialize(project);
+            return set_keyframe_interpolation(
+                project, selectors, requested_kind, requested_points);
+        };
+        const auto response_delta =
+            [&](const TimelineInterpolationResult& result,
+                bool dry_run,
+                const std::vector<json::Value>& previous,
+                const std::vector<json::Value>& current) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace(
+                    "interpolation",
+                    interpolation_request_value(requested_kind, requested_points));
+                response.emplace("key_count", number_value(result.key_count));
+                response.emplace(
+                    "changed_key_count", number_value(result.changed_key_count));
+                constexpr std::size_t kMaxReportedKeys = 256U;
+                const std::size_t reported =
+                    std::min(selectors.size(), kMaxReportedKeys);
+                response.emplace(
+                    "keys_truncated", bool_value(selectors.size() > reported));
+                json::Value::Array keys;
+                keys.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    json::Value::Object entry;
+                    const TimelineKeySelector& selector = selectors[index];
+                    entry.emplace(
+                        "kind", string_value(timeline_key_kind_name(selector.kind)));
+                    entry.emplace("animation", string_value(selector.animation_name));
+                    if (selector.kind == TimelineKeyKind::Transform) {
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(selector.transform_channel))));
+                    } else {
+                        entry.emplace("slot", string_value(selector.slot_name));
+                        if (selector.kind == TimelineKeyKind::Deform) {
+                            entry.emplace(
+                                "attachment", string_value(selector.attachment_name));
+                        }
+                    }
+                    entry.emplace("time", number_value(selector.time));
+                    entry.emplace(
+                        "previous_interpolation",
+                        index < previous.size() ? previous[index] : json::Value{});
+                    const bool changed = index < previous.size() &&
+                        index < current.size() &&
+                        !same_curve_value(previous[index], current[index]);
+                    entry.emplace("changed", bool_value(changed));
+                    keys.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("keys", array_value(std::move(keys)));
+                return object_value(std::move(response));
+            };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            materialize(&candidate);
+            const std::vector<json::Value> previous = collect_previous(candidate);
+            const TimelineInterpolationResult result = set_keyframe_interpolation(
+                &candidate, selectors, requested_kind, requested_points);
+            if (!result && !result.error.empty()) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            const std::vector<json::Value> current = collect_previous(candidate);
+            return make_success(
+                "Timeline key easing validated.",
+                op,
+                spec,
+                response_delta(result, true, previous, current));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            selectors.size() == 1U
+                ? "Set timeline key easing via Agent"
+                : "Set timeline key easings via Agent",
+            "timeline:interpolation",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        materialize(transaction.project());
+        const std::vector<json::Value> previous = collect_previous(*transaction.project());
+        const TimelineInterpolationResult result = set_keyframe_interpolation(
+            transaction.project(), selectors, requested_kind, requested_points);
+        if (!result && !result.error.empty()) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const std::vector<json::Value> current = collect_previous(*transaction.project());
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to set timeline key easing: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Set timeline key easing successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous, current));
+    }
+
+    if (op == "timeline.set_curve_mode") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.set_curve_mode requires an 'args' object.", op, spec);
+        }
+        const json::Value* keys_value = json::find_member(*args, "keys");
+        if (keys_value == nullptr || !keys_value->is_array() ||
+            keys_value->as_array().empty()) {
+            return make_error(
+                "timeline.set_curve_mode requires a non-empty keys(array).", op, spec);
+        }
+        if (keys_value->as_array().size() > 4096U) {
+            return make_error(
+                "timeline.set_curve_mode accepts at most 4096 keys.", op, spec);
+        }
+
+        std::vector<TimelineKeySelector> selectors;
+        selectors.reserve(keys_value->as_array().size());
+        for (std::size_t index = 0U; index < keys_value->as_array().size(); ++index) {
+            const json::Value& key_value = keys_value->as_array()[index];
+            if (!key_value.is_object()) {
+                return make_error(
+                    "timeline.set_curve_mode key " + std::to_string(index) +
+                        " must be an object.",
+                    op,
+                    spec);
+            }
+            const auto kind = string_arg_any(key_value, {"kind", "type"});
+            const auto animation = string_arg(key_value, "animation");
+            const auto time = number_arg(key_value, "time");
+            if (!kind.has_value() || !animation.has_value() || !time.has_value()) {
+                return make_error(
+                    "timeline.set_curve_mode key " + std::to_string(index) +
+                        " requires kind, animation, and time.",
+                    op,
+                    spec);
+            }
+
+            TimelineKeySelector selector;
+            selector.animation_name = std::string(*animation);
+            selector.time = *time;
+            if (*kind == "transform") {
+                const auto bone = string_arg(key_value, "bone");
+                const auto channel = string_arg(key_value, "channel");
+                if (!bone.has_value() || !channel.has_value()) {
+                    return make_error(
+                        "Transform curve-mode keys require bone and channel.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::Transform;
+                selector.bone_name = std::string(*bone);
+                if (*channel == "rotate") {
+                    selector.transform_channel = TransformTimelineChannel::Rotate;
+                } else if (*channel == "translate") {
+                    selector.transform_channel = TransformTimelineChannel::Translate;
+                } else if (*channel == "scale") {
+                    selector.transform_channel = TransformTimelineChannel::Scale;
+                } else if (*channel == "shear") {
+                    selector.transform_channel = TransformTimelineChannel::Shear;
+                } else {
+                    return make_error(
+                        "Transform curve-mode channel must be rotate, translate, scale, "
+                        "or shear.",
+                        op,
+                        spec);
+                }
+            } else if (*kind == "slot_color") {
+                const auto slot = string_arg(key_value, "slot");
+                if (!slot.has_value()) {
+                    return make_error(
+                        "Slot-colour curve-mode keys require slot.", op, spec);
+                }
+                selector.kind = TimelineKeyKind::SlotColor;
+                selector.slot_name = std::string(*slot);
+            } else if (*kind == "deform") {
+                // Deliberately narrower than timeline.set_interpolation: a
+                // deform key's value is a vertex-offset vector with no
+                // canonical scalar to drive a tangent.
+                return make_error(
+                    "timeline.set_curve_mode does not support deform keys: a deform "
+                    "key's value has no canonical scalar to drive a tangent.",
+                    op,
+                    spec);
+            } else if (*kind == "draw_order" || *kind == "event" ||
+                       *kind == "slot_attachment" || *kind == "inherit") {
+                return make_error(
+                    "timeline.set_curve_mode does not support " + std::string(*kind) +
+                        " keys: they carry no easing at all.",
+                    op,
+                    spec);
+            } else {
+                return make_error(
+                    "Unknown timeline curve-mode key kind: " + std::string(*kind),
+                    op,
+                    spec);
+            }
+            selectors.push_back(std::move(selector));
+        }
+
+        marrow::editor::TimelineCurveMode requested_mode =
+            marrow::editor::TimelineCurveMode::Manual;
+        std::optional<marrow::editor::TimelineScalarComponent> requested_driver;
+        std::string mode_error;
+        if (!curve_mode_request_arg(
+                *args, &requested_mode, &requested_driver, &mode_error)) {
+            return make_error(mode_error, op, spec);
+        }
+
+        // MAR-172: a managed boundary key's easing is a copy of key 0's, so
+        // writing it here would be reverted by the synchronization in the same
+        // transaction. Reject before anything is materialized.
+        if (const std::string rejection = managed_loop_boundary_rejection(
+                *session.project(), skeleton, selectors);
+            !rejection.empty()) {
+            return make_error(rejection, op, spec, "invalid_request");
+        }
+        const auto materialize = [&](ProjectData* project) {
+            for (const TimelineKeySelector& selector : selectors) {
+                if (selector.kind == TimelineKeyKind::Transform) {
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name,
+                        selector.transform_channel);
+                } else if (selector.kind == TimelineKeyKind::SlotColor) {
+                    (void)ensure_slot_color_timeline_edit(
+                        *project, skeleton, selector.animation_name, selector.slot_name);
+                }
+            }
+        };
+        // Previous intent and curves are read from the materialized candidate,
+        // so a runtime-only track reports its runtime state rather than
+        // "not found".
+        struct PreviousIntent {
+            json::Value mode;
+            json::Value driver;
+            json::Value curve;
+        };
+        const auto collect_previous = [&](const ProjectData& project) {
+            std::vector<PreviousIntent> previous;
+            previous.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                PreviousIntent entry;
+                entry.curve = timeline_key_curve_value(project, selector);
+                const auto intent = timeline_key_curve_intent(project, selector);
+                if (intent.has_value()) {
+                    entry.mode = string_value(std::string(
+                        marrow::editor::curve_mode_token(intent->first)));
+                    entry.driver =
+                        intent->first == marrow::editor::TimelineCurveMode::Auto
+                        ? string_value(std::string(
+                              marrow::editor::curve_driver_token(intent->second)))
+                        : json::Value{};
+                }
+                previous.push_back(std::move(entry));
+            }
+            return previous;
+        };
+        const auto response_delta =
+            [&](const marrow::editor::TimelineCurveModeResult& result,
+                bool dry_run,
+                const std::vector<PreviousIntent>& previous,
+                const std::vector<json::Value>& current) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace(
+                    "mode",
+                    string_value(std::string(
+                        marrow::editor::curve_mode_token(requested_mode))));
+                response.emplace(
+                    "driver",
+                    requested_driver.has_value()
+                        ? string_value(std::string(marrow::editor::curve_driver_token(
+                              *requested_driver)))
+                        : json::Value{});
+                response.emplace("key_count", number_value(result.key_count));
+                response.emplace(
+                    "changed_key_count", number_value(result.changed_key_count));
+                response.emplace(
+                    "resolved_key_count", number_value(result.resolved_key_count));
+                constexpr std::size_t kMaxReportedKeys = 256U;
+                const std::size_t reported =
+                    std::min(selectors.size(), kMaxReportedKeys);
+                response.emplace(
+                    "keys_truncated", bool_value(selectors.size() > reported));
+                json::Value::Array keys;
+                keys.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    json::Value::Object entry;
+                    const TimelineKeySelector& selector = selectors[index];
+                    entry.emplace(
+                        "kind", string_value(timeline_key_kind_name(selector.kind)));
+                    entry.emplace("animation", string_value(selector.animation_name));
+                    if (selector.kind == TimelineKeyKind::Transform) {
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(selector.transform_channel))));
+                    } else {
+                        entry.emplace("slot", string_value(selector.slot_name));
+                    }
+                    entry.emplace("time", number_value(selector.time));
+                    entry.emplace(
+                        "previous_mode",
+                        index < previous.size() ? previous[index].mode : json::Value{});
+                    entry.emplace(
+                        "previous_driver",
+                        index < previous.size() ? previous[index].driver : json::Value{});
+                    entry.emplace(
+                        "previous_interpolation",
+                        index < previous.size() ? previous[index].curve : json::Value{});
+                    entry.emplace(
+                        "interpolation",
+                        index < current.size() ? current[index] : json::Value{});
+                    const bool changed = index < previous.size() &&
+                        index < current.size() &&
+                        !same_curve_value(previous[index].curve, current[index]);
+                    entry.emplace("changed", bool_value(changed));
+                    keys.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("keys", array_value(std::move(keys)));
+                return object_value(std::move(response));
+            };
+        const auto collect_curves = [&](const ProjectData& project) {
+            std::vector<json::Value> curves;
+            curves.reserve(selectors.size());
+            for (const TimelineKeySelector& selector : selectors) {
+                curves.push_back(timeline_key_curve_value(project, selector));
+            }
+            return curves;
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            materialize(&candidate);
+            const std::vector<PreviousIntent> previous = collect_previous(candidate);
+            const marrow::editor::TimelineCurveModeResult result =
+                marrow::editor::set_keyframe_curve_mode(
+                    &candidate, selectors, requested_mode, requested_driver);
+            if (!result && !result.error.empty()) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            const std::vector<json::Value> current = collect_curves(candidate);
+            return make_success(
+                "Timeline curve mode validated.",
+                op,
+                spec,
+                response_delta(result, true, previous, current));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            selectors.size() == 1U
+                ? "Set timeline curve mode via Agent"
+                : "Set timeline curve modes via Agent",
+            "timeline:curve-mode",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        materialize(transaction.project());
+        const std::vector<PreviousIntent> previous =
+            collect_previous(*transaction.project());
+        const marrow::editor::TimelineCurveModeResult result =
+            marrow::editor::set_keyframe_curve_mode(
+                transaction.project(), selectors, requested_mode, requested_driver);
+        if (!result && !result.error.empty()) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const std::vector<json::Value> current = collect_curves(*transaction.project());
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to set timeline curve mode: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Set timeline curve mode successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous, current));
+    }
+
+    if (op == "timeline.set_loop_sync") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.set_loop_sync requires an 'args' object.", op, spec);
+        }
+        std::vector<marrow::editor::TimelineLaneSelector> lanes;
+        std::string lane_error;
+        if (!timeline_lane_selectors_arg(*args, &lanes, &lane_error)) {
+            return make_error(lane_error, op, spec);
+        }
+        const json::Value* enabled_value = json::find_member(*args, "enabled");
+        if (enabled_value == nullptr || !enabled_value->is_boolean()) {
+            // Missing is an error rather than a default: guessing for a whole
+            // selection is destructive in exactly one of the two directions.
+            return make_error(
+                "timeline.set_loop_sync requires a boolean 'enabled'.", op, spec);
+        }
+        const bool requested_enabled = enabled_value->as_boolean();
+
+        const auto materialize = [&](ProjectData* project) {
+            for (const marrow::editor::TimelineLaneSelector& lane : lanes) {
+                switch (lane.kind) {
+                case marrow::editor::TimelineLaneKind::Transform:
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        lane.animation_name,
+                        lane.bone_name,
+                        lane.transform_channel);
+                    break;
+                case marrow::editor::TimelineLaneKind::SlotColor:
+                    (void)ensure_slot_color_timeline_edit(
+                        *project, skeleton, lane.animation_name, lane.slot_name);
+                    break;
+                case marrow::editor::TimelineLaneKind::Deform:
+                    (void)ensure_mesh_deform_timeline_edit(
+                        *project,
+                        skeleton,
+                        lane.animation_name,
+                        lane.slot_name,
+                        lane.attachment_name);
+                    break;
+                }
+            }
+        };
+
+        struct LaneReport {
+            bool enabled{false};
+            json::Value duration;
+            json::Value boundary_time;
+            json::Value boundary;
+        };
+        // The boundary key is reported using the `.marrow` keyframe encoding so
+        // a caller can compare it against the stored bytes. A deform boundary
+        // reports its vertex count instead of hundreds of offsets: the response
+        // is a report, not a copy.
+        const auto collect = [&](const ProjectData& project) {
+            std::vector<LaneReport> reports;
+            reports.reserve(lanes.size());
+            for (const marrow::editor::TimelineLaneSelector& lane : lanes) {
+                LaneReport entry;
+                // The managed boundary is derived: it is the key at
+                // `float32(duration)`, so a lane whose last key sits elsewhere
+                // reports no boundary at all rather than its last authored key.
+                const auto* animation = skeleton.find_animation(lane.animation_name);
+                std::optional<double> boundary_time;
+                if (animation != nullptr && animation->explicit_duration.has_value()) {
+                    entry.duration = number_value(*animation->explicit_duration);
+                    boundary_time = static_cast<double>(
+                        static_cast<marrow::runtime::AnimationScalar>(
+                            *animation->explicit_duration));
+                }
+                const auto boundary_of = [&](const auto* edit) {
+                    if (edit == nullptr) return;
+                    entry.enabled = edit->loop_sync;
+                    if (edit->keyframes.size() < 2U || !boundary_time.has_value()) return;
+                    const auto& key = edit->keyframes.back();
+                    if (std::abs(key.time - *boundary_time) > 1e-6) return;
+                    entry.boundary_time = number_value(key.time);
+                    json::Value::Object encoded;
+                    encoded.emplace("time", number_value(key.time));
+                    encoded.emplace(
+                        "curve", interpolation_curve_value(key.interpolation));
+                    entry.boundary = object_value(std::move(encoded));
+                };
+                switch (lane.kind) {
+                case marrow::editor::TimelineLaneKind::Transform: {
+                    const auto* edit = project.find_transform_timeline_edit(
+                        lane.animation_name, lane.bone_name, lane.transform_channel);
+                    boundary_of(edit);
+                    if (edit != nullptr && entry.boundary.is_object()) {
+                        const auto& key = edit->keyframes.back();
+                        if (lane.transform_channel == TransformTimelineChannel::Rotate) {
+                            entry.boundary.as_object()["angle"] = number_value(key.angle);
+                        } else {
+                            entry.boundary.as_object()["x"] = number_value(key.x);
+                            entry.boundary.as_object()["y"] = number_value(key.y);
+                        }
+                    }
+                    break;
+                }
+                case marrow::editor::TimelineLaneKind::SlotColor: {
+                    const auto* edit = project.find_slot_color_timeline_edit(
+                        lane.animation_name, lane.slot_name);
+                    boundary_of(edit);
+                    if (edit != nullptr && entry.boundary.is_object()) {
+                        const auto& color = edit->keyframes.back().color;
+                        entry.boundary.as_object()["r"] = number_value(color.r);
+                        entry.boundary.as_object()["g"] = number_value(color.g);
+                        entry.boundary.as_object()["b"] = number_value(color.b);
+                        entry.boundary.as_object()["a"] = number_value(color.a);
+                    }
+                    break;
+                }
+                case marrow::editor::TimelineLaneKind::Deform: {
+                    const auto* edit = project.find_mesh_deform_timeline_edit(
+                        lane.animation_name, lane.slot_name, lane.attachment_name);
+                    boundary_of(edit);
+                    if (edit != nullptr && entry.boundary.is_object()) {
+                        entry.boundary.as_object()["vertex_count"] =
+                            number_value(edit->keyframes.back().vertex_offsets.size());
+                    }
+                    break;
+                }
+                }
+                reports.push_back(std::move(entry));
+            }
+            return reports;
+        };
+
+        const auto boundary_action_name =
+            [](marrow::editor::TimelineLoopBoundaryAction action) -> std::string {
+            switch (action) {
+            case marrow::editor::TimelineLoopBoundaryAction::Created:
+                return "created";
+            case marrow::editor::TimelineLoopBoundaryAction::Adopted:
+                return "adopted";
+            case marrow::editor::TimelineLoopBoundaryAction::Moved:
+                return "moved";
+            case marrow::editor::TimelineLoopBoundaryAction::Rewritten:
+                return "rewritten";
+            case marrow::editor::TimelineLoopBoundaryAction::Released:
+                return "released";
+            case marrow::editor::TimelineLoopBoundaryAction::Unchanged:
+                break;
+            }
+            return "unchanged";
+        };
+
+        const auto response_delta =
+            [&](const marrow::editor::TimelineLoopSyncResult& result,
+                bool dry_run,
+                const std::vector<LaneReport>& previous,
+                const std::vector<LaneReport>& current) {
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace("enabled", bool_value(requested_enabled));
+                response.emplace("lane_count", number_value(result.lane_count));
+                response.emplace(
+                    "changed_lane_count", number_value(result.changed_lane_count));
+                response.emplace(
+                    "synchronized_lane_count",
+                    number_value(result.synchronized_lane_count));
+                response.emplace(
+                    "created_key_count", number_value(result.created_key_count));
+                response.emplace("moved_key_count", number_value(result.moved_key_count));
+                response.emplace(
+                    "rewritten_key_count", number_value(result.rewritten_key_count));
+                response.emplace(
+                    "resolved_key_count", number_value(result.resolved_key_count));
+                constexpr std::size_t kMaxReportedLanes = 256U;
+                const std::size_t reported = std::min(lanes.size(), kMaxReportedLanes);
+                response.emplace(
+                    "lanes_truncated", bool_value(lanes.size() > reported));
+                json::Value::Array reported_lanes;
+                reported_lanes.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    const marrow::editor::TimelineLaneSelector& lane = lanes[index];
+                    json::Value::Object entry;
+                    entry.emplace(
+                        "kind",
+                        string_value(std::string(
+                            marrow::editor::timeline_lane_kind_token(lane.kind))));
+                    entry.emplace("animation", string_value(lane.animation_name));
+                    if (lane.kind == marrow::editor::TimelineLaneKind::Transform) {
+                        entry.emplace("bone", string_value(lane.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(lane.transform_channel))));
+                    } else {
+                        entry.emplace("slot", string_value(lane.slot_name));
+                        if (lane.kind == marrow::editor::TimelineLaneKind::Deform) {
+                            entry.emplace(
+                                "attachment", string_value(lane.attachment_name));
+                        }
+                    }
+                    entry.emplace(
+                        "previous_enabled",
+                        bool_value(index < previous.size() && previous[index].enabled));
+                    entry.emplace(
+                        "enabled",
+                        bool_value(index < current.size() && current[index].enabled));
+                    entry.emplace(
+                        "duration",
+                        index < current.size() ? current[index].duration : json::Value{});
+                    entry.emplace(
+                        "boundary_time",
+                        index < current.size() ? current[index].boundary_time
+                                               : json::Value{});
+                    entry.emplace(
+                        "boundary_action",
+                        string_value(
+                            index < result.lane_actions.size()
+                                ? boundary_action_name(result.lane_actions[index])
+                                : std::string("unchanged")));
+                    entry.emplace(
+                        "previous_boundary",
+                        index < previous.size() ? previous[index].boundary
+                                                : json::Value{});
+                    entry.emplace(
+                        "boundary",
+                        index < current.size() ? current[index].boundary : json::Value{});
+                    const bool changed = index < previous.size() &&
+                        index < current.size() &&
+                        (previous[index].enabled != current[index].enabled ||
+                         !same_curve_value(
+                             previous[index].boundary, current[index].boundary));
+                    entry.emplace("changed", bool_value(changed));
+                    reported_lanes.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("lanes", array_value(std::move(reported_lanes)));
+                return object_value(std::move(response));
+            };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            materialize(&candidate);
+            const std::vector<LaneReport> previous = collect(candidate);
+            const marrow::editor::TimelineLoopSyncResult result =
+                marrow::editor::set_timeline_loop_sync(
+                    &candidate, skeleton, lanes, requested_enabled);
+            if (!result && !result.error.empty()) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            const std::vector<LaneReport> current = collect(candidate);
+            return make_success(
+                "Timeline loop synchronization validated.",
+                op,
+                spec,
+                response_delta(result, true, previous, current));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            requested_enabled
+                ? (lanes.size() == 1U ? "Enable loop synchronization via Agent"
+                                      : "Enable loop synchronization on timelines via Agent")
+                : (lanes.size() == 1U ? "Disable loop synchronization via Agent"
+                                      : "Disable loop synchronization on timelines via Agent"),
+            "timeline:loop-sync",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        materialize(transaction.project());
+        const std::vector<LaneReport> previous = collect(*transaction.project());
+        const marrow::editor::TimelineLoopSyncResult result =
+            marrow::editor::set_timeline_loop_sync(
+                transaction.project(), skeleton, lanes, requested_enabled);
+        if (!result && !result.error.empty()) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        const std::vector<LaneReport> current = collect(*transaction.project());
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to set loop synchronization: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Set timeline loop synchronization successfully.",
+            op,
+            spec,
+            response_delta(result, false, previous, current));
+    }
+
+    if (op == "timeline.scale_key_times") {
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                "timeline.scale_key_times requires an 'args' object.", op, spec);
+        }
+        const json::Value* keys_value = json::find_member(*args, "keys");
+        if (keys_value == nullptr || !keys_value->is_array() ||
+            keys_value->as_array().empty()) {
+            return make_error(
+                "timeline.scale_key_times requires a non-empty keys(array).", op, spec);
+        }
+        if (keys_value->as_array().size() > 4096U) {
+            return make_error(
+                "timeline.scale_key_times accepts at most 4096 keys.", op, spec);
+        }
+        std::vector<TimelineKeySelector> selectors;
+        std::string selector_error;
+        if (!timeline_key_selectors_arg(
+                *keys_value,
+                "timeline.scale_key_times",
+                "scale",
+                &selectors,
+                &selector_error)) {
+            return make_error(std::move(selector_error), op, spec);
+        }
+        // Missing is an error rather than a default: guessing a ratio or an
+        // anchor for the caller's whole selection is destructive.
+        const auto requested_scale = number_arg(*args, "scale");
+        if (!requested_scale.has_value()) {
+            return make_error(
+                "timeline.scale_key_times requires a numeric 'scale'.", op, spec);
+        }
+        const auto pivot_token = string_arg(*args, "pivot");
+        std::optional<marrow::editor::TimelineScalePivot> pivot;
+        if (pivot_token.has_value()) {
+            if (*pivot_token == "start") {
+                pivot = marrow::editor::TimelineScalePivot::RangeStart;
+            } else if (*pivot_token == "end") {
+                pivot = marrow::editor::TimelineScalePivot::RangeEnd;
+            }
+        }
+        if (!pivot.has_value()) {
+            return make_error(
+                "timeline.scale_key_times requires a 'pivot' of \"start\" or \"end\".",
+                op,
+                spec);
+        }
+        // A scripted ratio is exact, so snapping is opt-in here while
+        // timeline.retime_keyframes defaults its pointer-shaped delta to on.
+        const bool snap = bool_arg(args, "snap", false);
+        const double frames_per_second =
+            number_arg(*args, "frames_per_second")
+                .value_or(session.project()->editor_metadata.timeline.frames_per_second);
+        if (snap && (!std::isfinite(frames_per_second) || frames_per_second <= 0.0)) {
+            return make_error(
+                "timeline.scale_key_times frames per second must be positive.", op, spec);
+        }
+
+        const auto materialize = [&](ProjectData* project) {
+            for (const TimelineKeySelector& selector : selectors) {
+                switch (selector.kind) {
+                case TimelineKeyKind::Transform:
+                    (void)ensure_transform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name,
+                        selector.transform_channel);
+                    break;
+                case TimelineKeyKind::Deform:
+                    (void)ensure_mesh_deform_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name,
+                        selector.attachment_name);
+                    break;
+                case TimelineKeyKind::DrawOrder:
+                    (void)ensure_draw_order_timeline_edit(
+                        *project, skeleton, selector.animation_name);
+                    break;
+                case TimelineKeyKind::Event:
+                    (void)ensure_event_timeline_edit(
+                        *project, skeleton, selector.animation_name);
+                    break;
+                case TimelineKeyKind::SlotColor:
+                    (void)ensure_slot_color_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name);
+                    break;
+                case TimelineKeyKind::SlotAttachment:
+                    (void)ensure_slot_attachment_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.slot_name);
+                    break;
+                // MAR-185: same reason as the retime path above.
+                case TimelineKeyKind::Inherit:
+                    (void)ensure_bone_inherit_timeline_edit(
+                        *project,
+                        skeleton,
+                        selector.animation_name,
+                        selector.bone_name);
+                    break;
+                }
+            }
+        };
+        // Snapping reshapes the ratio so the MOVED edge lands on a frame
+        // boundary; interior keys keep the ratio's exact placement, because
+        // quantizing them would stop the result from being a scale at all.
+        double applied_request = *requested_scale;
+        if (snap) {
+            double minimum_time = std::numeric_limits<double>::infinity();
+            double maximum_time = -std::numeric_limits<double>::infinity();
+            for (const TimelineKeySelector& selector : selectors) {
+                minimum_time = std::min(minimum_time, selector.time);
+                maximum_time = std::max(maximum_time, selector.time);
+            }
+            const bool start_pivot =
+                *pivot == marrow::editor::TimelineScalePivot::RangeStart;
+            const auto snapped = marrow::editor::timeline_model::snap_scale_to_frames(
+                start_pivot ? minimum_time : maximum_time,
+                start_pivot ? maximum_time : minimum_time,
+                *requested_scale,
+                frames_per_second);
+            if (!snapped.has_value()) {
+                return make_error(
+                    "No frame boundary produces a positive scale ratio.", op, spec);
+            }
+            applied_request = *snapped;
+        }
+
+        const auto apply = [&](ProjectData* project) {
+            materialize(project);
+            return marrow::editor::scale_keyframe_times(
+                project, selectors, *pivot, applied_request);
+        };
+        // `previous_time` comes from the primitive's resolved snapshot, not
+        // from the request: a selector's `time` only has to identify a key
+        // within the resolver's one-microsecond window, so echoing it would
+        // report what the caller asked for rather than what the project holds.
+        const auto response_delta =
+            [&](const marrow::editor::TimelineScaleResult& result, bool dry_run) {
+                const std::vector<double>& previous_times = result.previous_times;
+                json::Value::Object response;
+                response.emplace("dry_run", bool_value(dry_run));
+                response.emplace("requested_scale", number_value(*requested_scale));
+                response.emplace("applied_scale", number_value(applied_request));
+                response.emplace(
+                    "pivot",
+                    string_value(std::string(
+                        *pivot == marrow::editor::TimelineScalePivot::RangeStart
+                            ? "start"
+                            : "end")));
+                response.emplace("pivot_time", number_value(result.pivot_time));
+                response.emplace("original_span", number_value(result.original_span));
+                response.emplace("scaled_span", number_value(result.scaled_span));
+                response.emplace("snap", bool_value(snap));
+                response.emplace("frames_per_second", number_value(frames_per_second));
+                response.emplace("key_count", number_value(result.key_count));
+                response.emplace(
+                    "moved_key_count", number_value(result.moved_key_count));
+                constexpr std::size_t kMaxReportedKeys = 256U;
+                const std::size_t reported =
+                    std::min(selectors.size(), kMaxReportedKeys);
+                response.emplace(
+                    "keys_truncated", bool_value(selectors.size() > reported));
+                json::Value::Array reported_keys;
+                reported_keys.reserve(reported);
+                for (std::size_t index = 0U; index < reported; ++index) {
+                    const TimelineKeySelector& selector = selectors[index];
+                    const double previous = index < previous_times.size()
+                        ? previous_times[index]
+                        : selector.time;
+                    const double scaled = result.pivot_time +
+                        (previous - result.pivot_time) * applied_request;
+                    json::Value::Object entry;
+                    entry.emplace("kind", string_value(timeline_key_kind_name(selector.kind)));
+                    entry.emplace("animation", string_value(selector.animation_name));
+                    switch (selector.kind) {
+                    case TimelineKeyKind::Transform:
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        entry.emplace(
+                            "channel",
+                            string_value(std::string(
+                                transform_channel_name(selector.transform_channel))));
+                        break;
+                    case TimelineKeyKind::Deform:
+                        entry.emplace("slot", string_value(selector.slot_name));
+                        entry.emplace(
+                            "attachment", string_value(selector.attachment_name));
+                        break;
+                    case TimelineKeyKind::SlotColor:
+                    case TimelineKeyKind::SlotAttachment:
+                        entry.emplace("slot", string_value(selector.slot_name));
+                        break;
+                    case TimelineKeyKind::Inherit:
+                        entry.emplace("bone", string_value(selector.bone_name));
+                        break;
+                    case TimelineKeyKind::Event:
+                        entry.emplace(
+                            "ordinal", number_value(selector.same_time_ordinal));
+                        break;
+                    case TimelineKeyKind::DrawOrder:
+                        break;
+                    }
+                    entry.emplace("previous_time", number_value(previous));
+                    entry.emplace("time", number_value(scaled));
+                    entry.emplace(
+                        "moved", bool_value(std::abs(scaled - previous) > 1e-12));
+                    reported_keys.push_back(object_value(std::move(entry)));
+                }
+                response.emplace("keys", array_value(std::move(reported_keys)));
+                return object_value(std::move(response));
+            };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            const marrow::editor::TimelineScaleResult result = apply(&candidate);
+            if (!result) {
+                return make_error(
+                    result.error,
+                    op,
+                    spec,
+                    std::string(classify_timeline_key_error(result.error)));
+            }
+            return make_success(
+                "Timeline key scaling validated.",
+                op,
+                spec,
+                response_delta(result, true));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            selectors.size() == 1U
+                ? "Scale timeline key via Agent"
+                : "Scale timeline keys via Agent",
+            "timeline:scale",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const marrow::editor::TimelineScaleResult result = apply(transaction.project());
+        if (!result) {
+            const std::string error = result.error;
+            transaction.cancel();
+            return make_error(
+                error, op, spec, std::string(classify_timeline_key_error(error)));
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error("No changes made.", op, spec, "no_change");
+        }
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{"Failed to scale timeline keys: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            "Scaled timeline keys successfully.",
             op,
             spec,
             response_delta(result, false));
@@ -912,6 +2422,19 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (offsets.size() != attachment->mesh_geometry->vertices.size()) {
             return make_error("offsets must match the target mesh vertex offset count.", op, spec);
         }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Deform;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.attachment_name = std::string(*attachment_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    *session.project(), skeleton, selector);
+                !rejection.empty()) {
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         std::string interpolation_error;
         const auto interpolation = interpolation_arg(*args, "interpolation", &interpolation_error);
         if (!interpolation.has_value()) {
@@ -1006,6 +2529,20 @@ AgentDispatchResult handle_timeline_editing_operation(
             transaction.cancel();
             return make_error("Deform keyframe not found.", op, spec, "not_found");
         }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::Deform;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.attachment_name = std::string(*attachment_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    project, skeleton, selector);
+                !rejection.empty()) {
+                transaction.cancel();
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         if (edit_it->keyframes.size() <= 1U) {
             transaction.cancel();
             return make_error(
@@ -1025,7 +2562,8 @@ AgentDispatchResult handle_timeline_editing_operation(
         return make_success("Removed deform keyframe successfully.", op, spec);
     }
 
-    if (op == "set_vertex_weights" || op == "normalize_weights") {
+    if (op == "set_vertex_weights" || op == "normalize_weights" ||
+        op == "mesh.rebind_weights" || op == "mesh.generate_weights") {
         const json::Value* args = command_args(cmd);
         if (args == nullptr) {
             return make_error(std::string(op) + " requires 'args' object.", op, spec);
@@ -1041,26 +2579,68 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (attachment == nullptr) {
             return make_error("Mesh attachment not found.", op, spec, "not_found");
         }
-        if (bool_arg(args, "dry_run")) {
-            json::Value::Object preview;
-            preview.emplace("dry_run", bool_value(true));
-            preview.emplace("vertex_count", number_value(attachment->mesh_geometry->weights.size()));
-            return make_success("Mesh weight edit validated.", op, spec, object_value(std::move(preview)));
-        }
-        auto transaction = session.begin_edit({
-            EditKind::EditProperty,
-            "Edit mesh weights via Agent",
-            "Agent",
-            false,
-            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
-        if (!transaction) {
-            return make_error(transaction.error()->format(), op, spec, "transaction_active");
-        }
-        ProjectData& project = *transaction.project();
-        MeshWeightAttachmentEdit* edit = ensure_mesh_weight_edit(
-            project, skeleton, *skin_name, *slot_name, *attachment_name, *attachment);
+        const MeshWeightTarget target{
+            std::string(*skin_name), std::string(*slot_name), std::string(*attachment_name)};
 
+        // `bones` is REQUIRED for mesh.generate_weights and is never expanded.
+        // A default of "every bone" is exactly the silent expansion the story
+        // forbids, and a default of "the bones already influencing the vertex"
+        // would make the operation a no-op for its main use. Parsed here, before
+        // any transaction, so an unresolvable name is reported as `not_found`
+        // rather than surfacing from the primitive as `invalid_request`.
+        std::vector<std::string> requested_bones;
+        if (op == "mesh.generate_weights") {
+            const json::Value* bones = json::find_member(*args, "bones");
+            if (bones == nullptr || !bones->is_array()) {
+                return make_error(
+                    "mesh.generate_weights requires a 'bones' array of candidate bone names.",
+                    op,
+                    spec);
+            }
+            if (bones->as_array().empty()) {
+                return make_error(
+                    "mesh.generate_weights requires at least one candidate bone.", op, spec);
+            }
+            for (const json::Value& bone_value : bones->as_array()) {
+                if (!bone_value.is_string() || bone_value.as_string().empty()) {
+                    return make_error(
+                        "candidate bone names must be non-empty strings.", op, spec);
+                }
+                const std::string bone_name = bone_value.as_string();
+                if (!skeleton.find_bone_index(bone_name).has_value()) {
+                    return make_error("Bone not found: " + bone_name, op, spec, "not_found");
+                }
+                if (std::find(requested_bones.begin(), requested_bones.end(), bone_name) !=
+                    requested_bones.end()) {
+                    return make_error(
+                        "A candidate bone was listed more than once.", op, spec);
+                }
+                requested_bones.push_back(bone_name);
+            }
+        }
+
+        // Preflight everything into locals BEFORE opening a transaction. The
+        // shipped handler wrote `edit->vertices[i]` for earlier entries and
+        // could then reject on a later one, relying on the transaction
+        // destructor to unwind; parsing first makes the atomicity local and
+        // visible instead.
+        std::vector<std::pair<std::size_t, MeshWeightVertexEdit>> requested_vertices;
+        std::vector<std::size_t> requested_scope;
         if (op == "set_vertex_weights") {
+            // MAR-175 C1: canonicalization is unconditional, so "normalize":
+            // false has no implementable meaning. Honouring it re-opens the
+            // defects where a committed write could not be saved; ignoring it
+            // would report success for a request that was not carried out.
+            if (const json::Value* normalize_flag = json::find_member(*args, "normalize");
+                normalize_flag != nullptr && normalize_flag->is_boolean() &&
+                !normalize_flag->as_boolean()) {
+                return make_error(
+                    "normalize:false is no longer supported; weight writes are always "
+                    "canonicalized.",
+                    op,
+                    spec,
+                    "invalid_request");
+            }
             const json::Value* vertices = json::find_member(*args, "vertices");
             if (vertices == nullptr || !vertices->is_array()) {
                 return make_error("set_vertex_weights requires vertices array.", op, spec);
@@ -1075,12 +2655,11 @@ AgentDispatchResult handle_timeline_editing_operation(
                     return make_error("vertex index must be a non-negative integer.", op, spec);
                 }
                 const std::size_t vertex_index = static_cast<std::size_t>(std::round(*index_number));
-                if (vertex_index >= edit->vertices.size()) {
-                    return make_error("vertex index is outside the target mesh.", op, spec);
-                }
                 const json::Value* influences = json::find_member(vertex_value, "influences");
                 if (influences == nullptr || !influences->is_array() ||
-                    influences->as_array().empty() || influences->as_array().size() > 4U) {
+                    influences->as_array().empty() ||
+                    influences->as_array().size() >
+                        mesh_weight_model::kMaxMeshWeightInfluences) {
                     return make_error("vertex influences must contain 1 to 4 entries.", op, spec);
                 }
                 MeshWeightVertexEdit next_vertex;
@@ -1102,15 +2681,103 @@ AgentDispatchResult handle_timeline_editing_operation(
                     next_vertex.influences.push_back(
                         MeshWeightInfluenceEdit{std::string(*bone_name), *x, *y, *weight});
                 }
-                if (bool_arg(args, "normalize", true)) {
-                    normalize_weight_vertex(&next_vertex);
+                requested_vertices.emplace_back(vertex_index, std::move(next_vertex));
+            }
+        } else if (const json::Value* scope = json::find_member(*args, "vertices");
+                   scope != nullptr) {
+            if (!scope->is_array()) {
+                return make_error("vertices must be an array of vertex indices.", op, spec);
+            }
+            if (scope->as_array().empty()) {
+                return make_error(
+                    std::string(op) + " requires at least one vertex when 'vertices' is given.",
+                    op,
+                    spec);
+            }
+            for (const json::Value& index_value : scope->as_array()) {
+                if (!index_value.is_number() || index_value.as_number() < 0.0 ||
+                    std::abs(index_value.as_number() - std::round(index_value.as_number())) > 1e-6) {
+                    return make_error("vertex index must be a non-negative integer.", op, spec);
                 }
-                edit->vertices[vertex_index] = std::move(next_vertex);
+                requested_scope.push_back(
+                    static_cast<std::size_t>(std::round(index_value.as_number())));
             }
-        } else {
-            for (auto& vertex : edit->vertices) {
-                normalize_weight_vertex(&vertex);
+        }
+
+        // Run the identical preflight a live call runs, against a copy. A dry
+        // run therefore validates exactly what a live call validates and can
+        // report the same affected-vertex payload, without touching
+        // project_revision(), undo_count(), or dirty().
+        const auto apply_weight_edit = [&](ProjectData* into) -> MeshWeightResult {
+            if (op == "set_vertex_weights") {
+                return set_mesh_vertex_weights(
+                    into, skeleton, *attachment, target, requested_vertices);
             }
+            if (op == "normalize_weights") {
+                return normalize_mesh_weights(
+                    into, skeleton, *attachment, target, requested_scope);
+            }
+            if (op == "mesh.generate_weights") {
+                return generate_mesh_weights(
+                    into, skeleton, *attachment, target, requested_bones, requested_scope);
+            }
+            return rebind_mesh_weights(
+                into, skeleton, *attachment, target, requested_scope);
+        };
+
+        ProjectData preview_project = *session.project();
+        const MeshWeightResult preview_result = apply_weight_edit(&preview_project);
+        if (!preview_result) {
+            return make_error(preview_result.error, op, spec, "invalid_request");
+        }
+
+        const auto build_payload = [&](bool dry_run) {
+            json::Value::Object payload;
+            payload.emplace("dry_run", bool_value(dry_run));
+            payload.emplace("vertex_count", number_value(preview_result.vertex_count));
+            payload.emplace(
+                "scoped_vertex_count", number_value(preview_result.scoped_vertex_count));
+            json::Value::Array affected;
+            affected.reserve(preview_result.affected_vertices.size());
+            for (const std::size_t index : preview_result.affected_vertices) {
+                affected.push_back(number_value(index));
+            }
+            payload.emplace("affected_vertices", array_value(std::move(affected)));
+            payload.emplace("changed", bool_value(preview_result.changed));
+            // Emitted by mesh.generate_weights alone. Adding it unconditionally
+            // would change the shipped payload of three operations whose exact
+            // shape agent_dispatch_smoke asserts.
+            if (op == "mesh.generate_weights") {
+                payload.emplace(
+                    "candidate_bone_count", number_value(requested_bones.size()));
+            }
+            return object_value(std::move(payload));
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            return make_success(
+                op == "mesh.rebind_weights"
+                    ? "Mesh weight rebind validated."
+                    : (op == "mesh.generate_weights" ? "Mesh weight generation validated."
+                                                     : "Mesh weight edit validated."),
+                op,
+                spec,
+                build_payload(true));
+        }
+
+        auto transaction = session.begin_edit({
+            EditKind::EditProperty,
+            "Edit mesh weights via Agent",
+            "Agent",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const MeshWeightResult live_result = apply_weight_edit(transaction.project());
+        if (!live_result) {
+            transaction.cancel();
+            return make_error(live_result.error, op, spec, "invalid_request");
         }
 
         const CommitPolicy commit_policy = op == "normalize_weights"
@@ -1120,12 +2787,33 @@ AgentDispatchResult handle_timeline_editing_operation(
                   NoChangeResult::Success,
                   "Mesh weights already normalized.",
                   {}}
-            : CommitPolicy{"Failed to apply mesh weights: "};
+            : (op == "mesh.rebind_weights"
+                   ? CommitPolicy{
+                         "Failed to apply mesh weights: ",
+                         "invalid_request",
+                         NoChangeResult::Success,
+                         "Mesh weights already bound to the setup pose.",
+                         {}}
+                   : (op == "mesh.generate_weights"
+                          ? CommitPolicy{
+                                "Failed to apply mesh weights: ",
+                                "invalid_request",
+                                NoChangeResult::Success,
+                                "Mesh weights already match the generated candidates.",
+                                {}}
+                          : CommitPolicy{"Failed to apply mesh weights: "}));
         if (auto result = commit_or_error(
                 transaction, op, spec, commit_policy)) {
             return std::move(*result);
         }
-        return make_success("Edited mesh weights successfully.", op, spec);
+        return make_success(
+            op == "mesh.rebind_weights"
+                ? "Rebound mesh weights successfully."
+                : (op == "mesh.generate_weights" ? "Generated mesh weights successfully."
+                                                 : "Edited mesh weights successfully."),
+            op,
+            spec,
+            build_payload(false));
     }
 
     if (op == "set_slot_color_keyframe") {
@@ -1143,6 +2831,18 @@ AgentDispatchResult handle_timeline_editing_operation(
             !skeleton.find_slot_index(*slot_name).has_value()) {
             return make_error("Animation or slot not found.", op, spec, "not_found");
         }
+        {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::SlotColor;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    *session.project(), skeleton, selector);
+                !rejection.empty()) {
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         std::string color_error;
         const auto color = color_arg(*args, "color", &color_error);
         if (!color.has_value()) {
@@ -1153,6 +2853,18 @@ AgentDispatchResult handle_timeline_editing_operation(
         if (!interpolation.has_value()) {
             return make_error(std::move(interpolation_error), op, spec);
         }
+        // MAR-171: `interpolation_arg()` returns Linear for an ABSENT member,
+        // so "the caller asked for this curve" and "the caller said nothing"
+        // are only distinguishable here. An explicitly supplied easing is an
+        // absolute authored curve and must demote the key, exactly as
+        // `timeline.set_interpolation` does; without that the resolver below
+        // would silently overwrite it and the call would report `no_change`.
+        // An absent member leaves an automatic key automatic, so a colour-only
+        // write still re-resolves against the value it just changed.
+        const json::Value* supplied_interpolation =
+            json::find_member(*args, "interpolation");
+        const bool interpolation_was_supplied =
+            supplied_interpolation != nullptr && !supplied_interpolation->is_null();
         json::Value::Object preview;
         preview.emplace("dry_run", bool_value(bool_arg(args, "dry_run")));
         preview.emplace("slot", string_value(std::string(*slot_name)));
@@ -1190,6 +2902,15 @@ AgentDispatchResult handle_timeline_editing_operation(
         key_it->time = *time;
         key_it->color = *color;
         key_it->interpolation = *interpolation;
+        if (interpolation_was_supplied) {
+            key_it->curve_mode = marrow::editor::TimelineCurveMode::Manual;
+        }
+        if (const std::string auto_curve_error =
+                resolve_agent_auto_curves(transaction.project());
+            !auto_curve_error.empty()) {
+            transaction.cancel();
+            return make_error(auto_curve_error, op, spec, "invalid_request");
+        }
         if (auto result = commit_or_error(
                 transaction,
                 op,
@@ -1221,6 +2942,19 @@ AgentDispatchResult handle_timeline_editing_operation(
             return make_error(transaction.error()->format(), op, spec, "transaction_active");
         }
         ProjectData& project = *transaction.project();
+        if (op == "remove_slot_color_keyframe") {
+            TimelineKeySelector selector;
+            selector.kind = TimelineKeyKind::SlotColor;
+            selector.animation_name = std::string(*anim_name);
+            selector.slot_name = std::string(*slot_name);
+            selector.time = *time;
+            if (const std::string rejection = managed_loop_boundary_rejection(
+                    project, skeleton, selector);
+                !rejection.empty()) {
+                transaction.cancel();
+                return make_error(rejection, op, spec, "invalid_request");
+            }
+        }
         bool removed = false;
         if (op == "remove_slot_color_keyframe") {
             SlotColorTimelineEdit* materialized = ensure_slot_color_timeline_edit(
@@ -1350,6 +3084,130 @@ AgentDispatchResult handle_timeline_editing_operation(
             return std::move(*result);
         }
         return make_success("Set attachment keyframe successfully.", op, spec, object_value(std::move(preview)));
+    }
+
+    // MAR-185. Both operations delegate to the shared authoring primitives --
+    // `merge_inherit_timeline` and `remove_inherit_timeline_keys` -- and
+    // reimplement NO validation, which is what keeps the GUI and the agent from
+    // ever disagreeing about what a legal inherit lane is.
+    if (op == "set_inherit_keyframe" || op == "remove_inherit_keyframe") {
+        const bool removing = op == "remove_inherit_keyframe";
+        const json::Value* args = command_args(cmd);
+        if (args == nullptr) {
+            return make_error(
+                std::string(op) + " requires 'args' object.", op, spec);
+        }
+        const auto anim_name = string_arg(*args, "animation");
+        const auto bone_name = string_arg(*args, "bone");
+        const auto time = number_arg(*args, "time");
+        if (!anim_name.has_value() || !bone_name.has_value() || !time.has_value()) {
+            return make_error(
+                std::string(op) + " requires animation, bone, and time.", op, spec);
+        }
+        std::optional<std::string_view> mode;
+        if (!removing) {
+            mode = string_arg(*args, "inherit");
+            if (!mode.has_value()) {
+                return make_error(
+                    "set_inherit_keyframe requires an inherit mode string.", op, spec);
+            }
+        }
+
+        // The effective lane AFTER the operation, echoed as `affected_keys`.
+        // Built by running the primitive against a candidate, so a dry run
+        // reports exactly what the real call would produce.
+        const auto apply = [&](ProjectData* project) -> AuthoringResult {
+            if (removing) {
+                const auto result = remove_inherit_timeline_keys(
+                    project, skeleton, *anim_name, *bone_name, {*time});
+                return {result.changed, result.error};
+            }
+            InheritTimelineMergeRequest request;
+            request.animation_name = std::string(*anim_name);
+            request.bone_name = std::string(*bone_name);
+            request.keys = {{*time, std::string(*mode)}};
+            request.replace_existing_times = true;
+            const auto result = merge_inherit_timeline(project, skeleton, request);
+            return {result.changed, result.error};
+        };
+        const auto lane_value = [&](const ProjectData& project) {
+            json::Value::Array keys;
+            if (const auto* edit = project.find_bone_inherit_timeline_edit(
+                    *anim_name, *bone_name)) {
+                for (const auto& keyframe : edit->keyframes) {
+                    json::Value::Object entry;
+                    entry.emplace("time", number_value(keyframe.time));
+                    entry.emplace(
+                        "inherit",
+                        string_value(std::string(inherit_mode_json_key(keyframe.inherit))));
+                    keys.push_back(object_value(std::move(entry)));
+                }
+            }
+            return array_value(std::move(keys));
+        };
+
+        if (bool_arg(args, "dry_run")) {
+            ProjectData candidate = *session.project();
+            const AuthoringResult result = apply(&candidate);
+            if (!result) {
+                return make_error(result.error, op, spec, "invalid_request");
+            }
+            json::Value::Object preview;
+            preview.emplace("dry_run", bool_value(true));
+            preview.emplace(
+                "kind",
+                string_value(timeline_key_kind_name(TimelineKeyKind::Inherit)));
+            preview.emplace("animation", string_value(std::string(*anim_name)));
+            preview.emplace("bone", string_value(std::string(*bone_name)));
+            preview.emplace("changed", bool_value(result.changed));
+            preview.emplace("affected_keys", lane_value(candidate));
+            return make_success(
+                "Inherit keyframe validated.", op, spec, object_value(std::move(preview)));
+        }
+
+        auto transaction = session.begin_edit({
+            removing ? EditKind::RemoveKeyframe : EditKind::AddKeyframe,
+            removing ? "Remove inherit keyframe via Agent"
+                     : "Set inherit keyframe via Agent",
+            "Agent",
+            false,
+            EditImpact::Project | EditImpact::Runtime | EditImpact::Preview});
+        if (!transaction) {
+            return make_error(transaction.error()->format(), op, spec, "transaction_active");
+        }
+        const AuthoringResult result = apply(transaction.project());
+        if (!result) {
+            transaction.cancel();
+            return make_error(result.error, op, spec, "invalid_request");
+        }
+        if (!result.changed) {
+            transaction.cancel();
+            return make_error(
+                "The inherit keyframe request changed nothing.", op, spec,
+                "invalid_request");
+        }
+        json::Value::Object response;
+        response.emplace("dry_run", bool_value(false));
+        response.emplace(
+            "kind", string_value(timeline_key_kind_name(TimelineKeyKind::Inherit)));
+        response.emplace("animation", string_value(std::string(*anim_name)));
+        response.emplace("bone", string_value(std::string(*bone_name)));
+        response.emplace("changed", bool_value(true));
+        response.emplace("affected_keys", lane_value(*transaction.project()));
+        if (auto commit = commit_or_error(
+                transaction,
+                op,
+                spec,
+                CommitPolicy{removing ? "Failed to remove inherit keyframe: "
+                                      : "Failed to apply inherit keyframe: "})) {
+            return std::move(*commit);
+        }
+        return make_success(
+            removing ? "Removed inherit keyframe successfully."
+                     : "Set inherit keyframe successfully.",
+            op,
+            spec,
+            object_value(std::move(response)));
     }
 
     if (op == "set_draw_order_keyframe") {

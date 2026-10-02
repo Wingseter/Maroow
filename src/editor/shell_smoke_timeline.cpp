@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -25,11 +26,13 @@
 #include "shell_inspector.hpp"
 #include "shell_project_panels.hpp"
 #include "shell_parameters.hpp"
+#include "shell_preferences.hpp"
 #include "shell_smoke_scenarios.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_timeline.hpp"
 #include "shell_weight_paint.hpp"
+#include "mesh_weight_model.hpp"
 #include "shell_viewport_ui.hpp"
 #include "shell_state.hpp"
 #include "viewport_renderer.hpp"
@@ -1076,7 +1079,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         return false;
     }
     if (std::abs(
-            shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation - 8.0f) >
+            shell_state.preview_skeleton()->bone_poses()[*spine_index].local_pose.rotation - 8.0f) >
         1e-3f) {
         std::cerr << "Timeline track focus did not apply the project-authored spine rotation.\n";
         return false;
@@ -1091,9 +1094,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const auto body_position =
-            draw_order_position(*shell_state.preview_skeleton, *body_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *body_slot_index);
         const auto spark_fx_position =
-            draw_order_position(*shell_state.preview_skeleton, *spark_fx_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *spark_fx_slot_index);
         if (!body_position.has_value() || !spark_fx_position.has_value() ||
             *body_position != 0U || *spark_fx_position != 2U) {
             std::cerr << "Timeline draw-order focus did not apply the project-authored slot order.\n";
@@ -1149,14 +1152,14 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
 
         if (!focus_timeline_track(&shell_state, *spine_track, 0.625, "Smoke", false) ||
             std::abs(
-                shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation -
+                shell_state.preview_skeleton()->bone_poses()[*spine_index].local_pose.rotation -
                 10.5f) > 1e-3f) {
             std::cerr << "Timeline editor smoke did not apply edited linear interpolation.\n";
             return false;
         }
         if (!scrub_timeline_time(&shell_state, 0.875, "Smoke", false) ||
             std::abs(
-                shell_state.preview_skeleton->bone_poses()[*spine_index].local_pose.rotation -
+                shell_state.preview_skeleton()->bone_poses()[*spine_index].local_pose.rotation -
                 12.0f) > 1e-3f) {
             std::cerr << "Timeline editor smoke did not apply the inserted stepped key.\n";
             return false;
@@ -1264,9 +1267,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const auto edited_body_position =
-            draw_order_position(*shell_state.preview_skeleton, *body_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *body_slot_index);
         const auto edited_spark_fx_position =
-            draw_order_position(*shell_state.preview_skeleton, *spark_fx_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *spark_fx_slot_index);
         if (!edited_body_position.has_value() || !edited_spark_fx_position.has_value() ||
             *edited_body_position != 0U || *edited_spark_fx_position != 1U) {
             std::cerr << "Timeline editor smoke did not apply the edited draw-order key.\n";
@@ -1277,9 +1280,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const auto inserted_body_position =
-            draw_order_position(*shell_state.preview_skeleton, *body_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *body_slot_index);
         const auto inserted_spark_fx_position =
-            draw_order_position(*shell_state.preview_skeleton, *spark_fx_slot_index);
+            draw_order_position(*shell_state.preview_skeleton(), *spark_fx_slot_index);
         if (!inserted_body_position.has_value() || !inserted_spark_fx_position.has_value() ||
             *inserted_body_position != 1U || *inserted_spark_fx_position != 0U) {
             std::cerr << "Timeline editor smoke did not apply the inserted draw-order key.\n";
@@ -1441,7 +1444,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
         const std::vector<double>* fixture_offsets =
-            shell_state.preview_skeleton->current_mesh_vertex_offsets(*body_slot_index);
+            shell_state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot_index);
         if (fixture_offsets == nullptr || fixture_offsets->size() != 8U ||
             std::abs((*fixture_offsets)[2] - 12.0) > 1e-3 ||
             std::abs((*fixture_offsets)[3] + 8.0) > 1e-3 ||
@@ -1486,7 +1489,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
                 return false;
             }
             const std::vector<double>* edited_mid_offsets =
-                shell_state.preview_skeleton->current_mesh_vertex_offsets(*body_slot_index);
+                shell_state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot_index);
             if (edited_mid_offsets == nullptr || edited_mid_offsets->size() != 8U ||
                 std::abs((*edited_mid_offsets)[2] - 14.0) > 1e-3 ||
                 std::abs((*edited_mid_offsets)[3] + 10.0) > 1e-3 ||
@@ -1500,7 +1503,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
                 return false;
             }
             const std::vector<double>* inserted_offsets =
-                shell_state.preview_skeleton->current_mesh_vertex_offsets(*body_slot_index);
+                shell_state.preview_skeleton()->current_mesh_vertex_offsets(*body_slot_index);
             if (inserted_offsets == nullptr || inserted_offsets->size() != 8U ||
                 std::abs((*inserted_offsets)[2] - 8.0) > 1e-3 ||
                 std::abs((*inserted_offsets)[3] + 6.0) > 1e-3 ||
@@ -1580,7 +1583,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* animated_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (animated_attachment == nullptr || animated_attachment->name != "warrior_body") {
             std::cerr << "Timeline scrub did not synchronize the animated body attachment.\n";
             return false;
@@ -1632,7 +1635,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* warrior_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (warrior_attachment == nullptr || warrior_attachment->name != "warrior_body" ||
             !warrior_attachment->linked_mesh.has_value()) {
             std::cerr << "Skin preview did not activate the warrior linked mesh attachment.\n";
@@ -1670,7 +1673,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* mage_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (mage_attachment == nullptr || mage_attachment->name != "mage_body" ||
             !mage_attachment->linked_mesh.has_value() ||
             mage_attachment->linked_mesh->parent_attachment != "body_mesh") {
@@ -1684,7 +1687,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto* restored_attachment =
-            shell_state.preview_skeleton->current_attachment(*body_slot_index);
+            shell_state.preview_skeleton()->current_attachment(*body_slot_index);
         if (restored_attachment == nullptr || restored_attachment->name != "warrior_body") {
             std::cerr << "Resetting the slot preview did not restore the warrior skin state.\n";
             return false;
@@ -1766,7 +1769,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return total;
         };
         const auto current_body_pose = [&]() -> std::optional<marrow::runtime::MeshAttachmentPose> {
-            return shell_state.preview_skeleton->evaluate_current_mesh_attachment(*body_slot_index);
+            return shell_state.preview_skeleton()->evaluate_current_mesh_attachment(*body_slot_index);
         };
 
         const EditorHistorySnapshot weight_paint_baseline =
@@ -2039,6 +2042,884 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             std::cerr << "Weight paint smoke could not restore the baseline state after export validation.\n";
             return false;
         }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // ── MAR-175: a newly painted influence binds against the SETUP pose ──
+        //
+        // Everything above paints `spine` onto vertices that already carry
+        // `spine`, so the shipped block never exercised the branch that adds a
+        // brand-new influence and never asserted a bind offset at all. That is
+        // what hid the defect: the new-influence bind was inverted from the
+        // *current preview pose*, so painting a new bone off setup pose wrote a
+        // pose-dependent offset straight into `.marrow`. Here the playhead is
+        // still parked on attack@0.2, and the assertion is against the setup
+        // pose, so the shipped behaviour fails it.
+        const auto arm_bone_index =
+            shell_state.load_result.skeleton_data->find_bone_index("arm_l");
+        if (!arm_bone_index.has_value()) {
+            std::cerr << "Setup-pose bind smoke could not resolve arm_l.\n";
+            return false;
+        }
+        const auto setup_transforms =
+            marrow::editor::mesh_weight_model::setup_pose_bone_world_transforms(
+                shell_state.load_result.skeleton_data);
+        if (setup_transforms.size() !=
+            shell_state.load_result.skeleton_data->bones().size()) {
+            std::cerr << "Setup-pose bind smoke could not build setup transforms.\n";
+            return false;
+        }
+        // The preview must actually be off setup pose, or the assertion proves
+        // nothing.
+        const auto& live_spine_transform =
+            shell_state.preview_skeleton()->bone_world_transforms()[*paint_bone_index];
+        const auto& setup_spine_transform = setup_transforms[*paint_bone_index];
+        const auto& live_arm_transform =
+            shell_state.preview_skeleton()->bone_world_transforms()[*arm_bone_index];
+        const auto& setup_arm_transform = setup_transforms[*arm_bone_index];
+        std::cout << "  MAR-175 setup-pose bind check: the playhead is off setup pose (arm_l "
+                     "scale a=" << live_arm_transform.a << " live vs " << setup_arm_transform.a
+                  << " at setup), so a current-pose bind is distinguishable from a setup one.\n";
+        const bool pose_differs_from_setup =
+            live_spine_transform.a != setup_spine_transform.a ||
+            live_spine_transform.b != setup_spine_transform.b ||
+            live_spine_transform.world_x != setup_spine_transform.world_x ||
+            live_spine_transform.world_y != setup_spine_transform.world_y ||
+            live_arm_transform.a != setup_arm_transform.a ||
+            live_arm_transform.b != setup_arm_transform.b ||
+            live_arm_transform.world_x != setup_arm_transform.world_x ||
+            live_arm_transform.world_y != setup_arm_transform.world_y;
+        if (!pose_differs_from_setup) {
+            std::cerr << "Setup-pose bind smoke needs a preview pose that differs from setup.\n";
+            return false;
+        }
+
+        // Vertex 0 carries only `spine`, so its setup-world position is that one
+        // bone's setup transform applied to its own bind offset.
+        // Resolve the attachment freshly: the runtime has been rebuilt several
+        // times above, so any pointer captured earlier is stale.
+        const std::optional<MeshWeightPaintTarget> setup_bind_target = current_weight_target();
+        if (!setup_bind_target.has_value() ||
+            setup_bind_target->source_attachment == nullptr ||
+            setup_bind_target->source_attachment->mesh_geometry == nullptr ||
+            setup_bind_target->source_attachment->mesh_geometry->weights.empty() ||
+            setup_bind_target->source_attachment->mesh_geometry->weights[0].influences.size() != 1U) {
+            std::cerr << "Setup-pose bind smoke expected a single-influence vertex 0.\n";
+            return false;
+        }
+        const auto& vertex0_bind =
+            setup_bind_target->source_attachment->mesh_geometry->weights[0].influences[0];
+        const double setup_world_x =
+            (vertex0_bind.x * static_cast<double>(setup_spine_transform.a)) +
+            (vertex0_bind.y * static_cast<double>(setup_spine_transform.b)) +
+            static_cast<double>(setup_spine_transform.world_x);
+        const double setup_world_y =
+            (vertex0_bind.x * static_cast<double>(setup_spine_transform.c)) +
+            (vertex0_bind.y * static_cast<double>(setup_spine_transform.d)) +
+            static_cast<double>(setup_spine_transform.world_y);
+        const auto expected_arm_bind =
+            marrow::editor::mesh_weight_model::inverse_transform_point_safe(
+                setup_transforms[*arm_bone_index], setup_world_x, setup_world_y);
+        if (!expected_arm_bind.has_value()) {
+            std::cerr << "Setup-pose bind smoke could not invert the arm_l setup transform.\n";
+            return false;
+        }
+
+        // Keep the body slot selected so the paint target resolves, and make
+        // arm_l the active influence bone.
+        shell_state.selection.toggle(marrow::editor::BoneSelection{"arm_l"});
+        shell_state.weight_paint.mode = WeightPaintMode::Paint;
+        shell_state.weight_paint.strength = 1.0f;
+        const std::optional<MeshWeightOverlay> new_bone_overlay = build_weight_overlay();
+        if (!new_bone_overlay.has_value() ||
+            new_bone_overlay->target.source_attachment_name != "body_mesh") {
+            std::cerr << "Setup-pose bind smoke could not build the new-influence overlay.\n";
+            return false;
+        }
+        begin_weight_paint_stroke(&shell_state, new_bone_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *new_bone_overlay,
+                new_bone_overlay->vertices[0].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Setup-pose bind smoke could not paint a new bone influence.\n";
+            return false;
+        }
+
+        const marrow::editor::MeshWeightAttachmentEdit* painted_edit =
+            shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                "mesh_base", "body", "body_mesh");
+        if (painted_edit == nullptr || painted_edit->vertices.empty()) {
+            std::cerr << "Setup-pose bind smoke did not author a mesh weight edit.\n";
+            return false;
+        }
+        const marrow::editor::MeshWeightInfluenceEdit* painted_arm = nullptr;
+        for (const auto& influence : painted_edit->vertices[0].influences) {
+            if (influence.bone_name == "arm_l") {
+                painted_arm = &influence;
+            }
+        }
+        if (painted_arm == nullptr) {
+            std::cerr << "Setup-pose bind smoke did not add the arm_l influence to vertex 0.\n";
+            return false;
+        }
+        if (std::abs(painted_arm->x - expected_arm_bind->x) > 1e-9 ||
+            std::abs(painted_arm->y - expected_arm_bind->y) > 1e-9) {
+            std::cerr << "A newly painted influence must bind against the setup pose. Expected ("
+                      << expected_arm_bind->x << ", " << expected_arm_bind->y << ") but wrote ("
+                      << painted_arm->x << ", " << painted_arm->y << ").\n";
+            return false;
+        }
+        // Canonical order: spine and arm_l tie at 0.5, broken on skeleton index.
+        if (painted_edit->vertices[0].influences.size() != 2U ||
+            painted_edit->vertices[0].influences[0].bone_name != "spine" ||
+            painted_edit->vertices[0].influences[1].bone_name != "arm_l" ||
+            !require_weight_near(painted_edit->vertices[0].influences[0].weight, 0.5, 1e-12, "new-influence spine weight") ||
+            !require_weight_near(painted_edit->vertices[0].influences[1].weight, 0.5, 1e-12, "new-influence arm_l weight")) {
+            std::cerr << "Setup-pose bind smoke did not canonicalize the painted vertex.\n";
+            return false;
+        }
+
+        // ── MAR-175: Replace assigns a target weight where Paint accumulates ──
+        if (!undo_project_change(&shell_state)) {
+            std::cerr << "Setup-pose bind smoke could not undo the new-influence stroke.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        const auto replace_active_weight = [&]() -> std::optional<double> {
+            const std::optional<MeshWeightPaintTarget> target = current_weight_target();
+            if (!target.has_value() || target->source_attachment == nullptr ||
+                target->source_attachment->mesh_geometry == nullptr ||
+                target->source_attachment->mesh_geometry->weights.size() < 2U) {
+                return std::nullopt;
+            }
+            return weight_for_bone(
+                target->source_attachment->mesh_geometry->weights[1], *arm_bone_index);
+        };
+
+        shell_state.weight_paint.mode = WeightPaintMode::Replace;
+        shell_state.weight_paint.strength = 1.0f;
+        const std::optional<MeshWeightOverlay> replace_overlay = build_weight_overlay();
+        if (!replace_overlay.has_value()) {
+            std::cerr << "Replace smoke could not build the overlay.\n";
+            return false;
+        }
+        begin_weight_paint_stroke(&shell_state, replace_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *replace_overlay,
+                replace_overlay->vertices[1].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Replace smoke could not apply a full-strength replace stroke.\n";
+            return false;
+        }
+        const std::optional<double> replaced_full = replace_active_weight();
+        if (shell_state.session.undo_count() != 1U ||
+            !replaced_full.has_value() ||
+            !require_weight_near(*replaced_full, 1.0, 1e-9, "replace at strength 1.0")) {
+            std::cerr << "Replace at strength 1.0 must drive the active bone to a full 1.0 in one pass.\n";
+            return false;
+        }
+
+        if (!undo_project_change(&shell_state)) {
+            std::cerr << "Replace smoke could not undo the full-strength stroke.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // Replace is a target, not a rate: a 0.4 stamp leaves the active bone at
+        // exactly 0.4 and scales the remaining influences to fill the other 0.6.
+        shell_state.weight_paint.strength = 0.4f;
+        const std::optional<MeshWeightOverlay> partial_overlay = build_weight_overlay();
+        if (!partial_overlay.has_value()) {
+            std::cerr << "Replace smoke could not build the partial overlay.\n";
+            return false;
+        }
+        begin_weight_paint_stroke(&shell_state, partial_overlay->target);
+        if (!apply_weight_paint_sample(
+                &shell_state,
+                *partial_overlay,
+                partial_overlay->vertices[1].screen_position) ||
+            !finish_weight_paint_stroke(&shell_state)) {
+            std::cerr << "Replace smoke could not apply a 0.4 replace stroke.\n";
+            return false;
+        }
+        const std::optional<double> replaced_partial = replace_active_weight();
+        // The slider is a float, so the exact target is 0.4f widened, not 0.4.
+        const double expected_partial =
+            static_cast<double>(shell_state.weight_paint.strength);
+        if (!replaced_partial.has_value() ||
+            !require_weight_near(*replaced_partial, expected_partial, 1e-9, "replace at strength 0.4")) {
+            std::cerr << "Replace must assign the stamp value and let canonicalization renormalize.\n";
+            return false;
+        }
+
+
+        // ── MAR-175: selected-scope Normalize, setup-pose Rebind, numeric edits ──
+        const auto weight_edit_snapshot = [&]() -> std::string {
+            const marrow::editor::MeshWeightAttachmentEdit* edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (edit == nullptr) {
+                return "<none>";
+            }
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (std::size_t vertex = 0; vertex < edit->vertices.size(); ++vertex) {
+                stream << 'v' << vertex << ':';
+                for (const auto& influence : edit->vertices[vertex].influences) {
+                    stream << influence.bone_name << '=' << influence.weight << '@'
+                           << influence.x << ',' << influence.y << ';';
+                }
+                stream << '|';
+            }
+            return stream.str();
+        };
+        const auto vertex_snapshot = [&](std::size_t vertex) -> std::string {
+            const marrow::editor::MeshWeightAttachmentEdit* edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (edit == nullptr || vertex >= edit->vertices.size()) {
+                return "<none>";
+            }
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (const auto& influence : edit->vertices[vertex].influences) {
+                stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                       << ',' << influence.y << ';';
+            }
+            return stream.str();
+        };
+
+        // Materialize the overlay once so the commands below have something to
+        // compare against, then clear history so the counts start from zero.
+        if (!normalize_weights_command(&shell_state)) {
+            std::cerr << "MAR-175 Normalize command failed on the unscoped attachment.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // Normalize is now a no-op: it must add no history and not dirty.
+        const std::string normalized_state = weight_edit_snapshot();
+        if (!normalize_weights_command(&shell_state) ||
+            shell_state.session.undo_count() != 0U ||
+            weight_edit_snapshot() != normalized_state) {
+            std::cerr << "A Normalize that changes nothing must add no history entry.\n";
+            return false;
+        }
+
+        // Rebind, both branches.
+        //
+        // Note the fixture's own offsets are NOT a fixed point of rebind: they
+        // were authored as round numbers against transforms that are (0,+50)
+        // and (-30,+60) by intent, but the runtime composes bone world
+        // transforms in float32, so the setup pose it reports carries ~1e-6 of
+        // error and a double-precision rebind moves the offsets by about that
+        // much. The no-change branch is therefore asserted below on rebind's
+        // own output, which is where it genuinely holds.
+        //
+        // Author a vertex whose offsets disagree about where it is -- the shape
+        // the paint path used to produce for a newly added bone -- and prove
+        // Rebind repairs it.
+        if (!set_active_vertex_weights_command(
+                &shell_state,
+                2U,
+                {{"spine", 64.0, 80.0, 0.5}, {"arm_l", 300.0, 250.0, 0.5}})) {
+            std::cerr << "MAR-175 Rebind smoke could not author an inconsistent vertex.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        const marrow::editor::MeshWeightAttachmentEdit* pre_rebind_edit =
+            shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                "mesh_base", "body", "body_mesh");
+        if (pre_rebind_edit == nullptr) {
+            std::cerr << "MAR-175 Rebind smoke could not find the weight edit.\n";
+            return false;
+        }
+        std::vector<std::vector<double>> pre_rebind_weights;
+        for (const auto& vertex : pre_rebind_edit->vertices) {
+            std::vector<double> row;
+            for (const auto& influence : vertex.influences) {
+                row.push_back(influence.weight);
+            }
+            pre_rebind_weights.push_back(std::move(row));
+        }
+        const std::optional<MeshWeightPaintTarget> rebind_target = current_weight_target();
+        if (!rebind_target.has_value() || rebind_target->source_attachment == nullptr ||
+            rebind_target->source_attachment->mesh_geometry == nullptr) {
+            std::cerr << "MAR-175 Rebind smoke could not resolve the target mesh.\n";
+            return false;
+        }
+        const std::vector<double> pre_rebind_vertices =
+            rebind_target->source_attachment->mesh_geometry->vertices;
+        const std::vector<std::size_t> pre_rebind_triangles =
+            rebind_target->source_attachment->mesh_geometry->triangles;
+        const std::vector<double> pre_rebind_uvs =
+            rebind_target->source_attachment->mesh_geometry->uvs;
+        const std::string pre_rebind_snapshot = weight_edit_snapshot();
+
+        if (!rebind_weights_command(&shell_state) ||
+            shell_state.session.undo_count() != 1U) {
+            std::cerr << "MAR-175 Rebind must run as exactly one history entry.\n";
+            return false;
+        }
+        const marrow::editor::MeshWeightAttachmentEdit* post_rebind_edit =
+            shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                "mesh_base", "body", "body_mesh");
+        if (post_rebind_edit == nullptr ||
+            post_rebind_edit->vertices.size() != pre_rebind_weights.size()) {
+            std::cerr << "MAR-175 Rebind changed the vertex count.\n";
+            return false;
+        }
+        for (std::size_t vertex = 0; vertex < post_rebind_edit->vertices.size(); ++vertex) {
+            const auto& influences = post_rebind_edit->vertices[vertex].influences;
+            if (influences.size() != pre_rebind_weights[vertex].size()) {
+                std::cerr << "MAR-175 Rebind changed which bones influence a vertex.\n";
+                return false;
+            }
+            for (std::size_t index = 0; index < influences.size(); ++index) {
+                if (influences[index].weight != pre_rebind_weights[vertex][index]) {
+                    std::cerr << "MAR-175 Rebind must not change any weight.\n";
+                    return false;
+                }
+            }
+        }
+        // The repaired vertex's influences must now name one setup-world point.
+        {
+            const auto setup = marrow::editor::mesh_weight_model::
+                setup_pose_bone_world_transforms(shell_state.load_result.skeleton_data);
+            const auto& repaired = post_rebind_edit->vertices[2].influences;
+            std::optional<double> shared_x;
+            std::optional<double> shared_y;
+            for (const auto& influence : repaired) {
+                const auto bone = shell_state.load_result.skeleton_data->find_bone_index(
+                    influence.bone_name);
+                if (!bone.has_value() || *bone >= setup.size()) {
+                    std::cerr << "MAR-175 Rebind smoke could not resolve a repaired bone.\n";
+                    return false;
+                }
+                const auto& transform = setup[*bone];
+                const double world_x = (influence.x * static_cast<double>(transform.a)) +
+                    (influence.y * static_cast<double>(transform.b)) +
+                    static_cast<double>(transform.world_x);
+                const double world_y = (influence.x * static_cast<double>(transform.c)) +
+                    (influence.y * static_cast<double>(transform.d)) +
+                    static_cast<double>(transform.world_y);
+                if (!shared_x.has_value()) {
+                    shared_x = world_x;
+                    shared_y = world_y;
+                } else if (std::abs(*shared_x - world_x) > 1e-9 ||
+                           std::abs(*shared_y - world_y) > 1e-9) {
+                    std::cerr << std::setprecision(17)
+                              << "After Rebind every influence must name the same setup-world point. "
+                              << influence.bone_name << " offset(" << influence.x << ", "
+                              << influence.y << ") -> world(" << world_x << ", " << world_y
+                              << ") vs (" << *shared_x << ", " << *shared_y << ") delta("
+                              << (world_x - *shared_x) << ", " << (world_y - *shared_y) << ")\n";
+                    return false;
+                }
+            }
+        }
+        // The no-change branch: rebinding rebind's own output records nothing.
+        if (!rebind_weights_command(&shell_state) ||
+            shell_state.session.undo_count() != 1U) {
+            std::cerr << "A Rebind that changes nothing must add no history entry.\n";
+            return false;
+        }
+
+        // Topology never moves.
+        const std::optional<MeshWeightPaintTarget> post_rebind_target = current_weight_target();
+        if (!post_rebind_target.has_value() ||
+            post_rebind_target->source_attachment == nullptr ||
+            post_rebind_target->source_attachment->mesh_geometry == nullptr ||
+            post_rebind_target->source_attachment->mesh_geometry->vertices !=
+                pre_rebind_vertices ||
+            post_rebind_target->source_attachment->mesh_geometry->triangles !=
+                pre_rebind_triangles ||
+            post_rebind_target->source_attachment->mesh_geometry->uvs != pre_rebind_uvs) {
+            std::cerr << "MAR-175 Rebind must not touch mesh topology.\n";
+            return false;
+        }
+        if (!undo_project_change(&shell_state) ||
+            weight_edit_snapshot() != pre_rebind_snapshot) {
+            std::cerr << "Undoing a Rebind must restore the bind offsets bit-exactly.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+
+        // Numeric influence edits: one transaction, one history entry, and the
+        // untouched vertices survive byte-identical.
+        const std::string numeric_vertex0_before = vertex_snapshot(0U);
+        const std::string numeric_vertex3_before = vertex_snapshot(3U);
+        if (!set_active_vertex_weights_command(
+                &shell_state,
+                1U,
+                {{"spine", 60.0, 0.0, 3.0}, {"arm_l", 20.0, 0.0, 1.0}}) ||
+            shell_state.session.undo_count() != 1U) {
+            std::cerr << "A numeric influence commit must be exactly one history entry.\n";
+            return false;
+        }
+        if (vertex_snapshot(0U) != numeric_vertex0_before ||
+            vertex_snapshot(3U) != numeric_vertex3_before) {
+            std::cerr << "A numeric influence commit must leave every other vertex byte-identical.\n";
+            return false;
+        }
+        {
+            const marrow::editor::MeshWeightAttachmentEdit* edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (edit == nullptr || edit->vertices[1].influences.size() != 2U ||
+                !require_weight_near(edit->vertices[1].influences[0].weight, 0.75, 1e-12, "numeric spine weight") ||
+                !require_weight_near(edit->vertices[1].influences[1].weight, 0.25, 1e-12, "numeric arm_l weight")) {
+                std::cerr << "A numeric influence commit must redisplay the renormalized weight.\n";
+                return false;
+            }
+        }
+
+        // AC4 rejections: each leaves the project byte-identical and adds no
+        // history. serialize_project() is the project-wide statement of that.
+        const std::string project_before_rejections =
+            marrow::editor::serialize_project(*shell_state.load_result.project);
+        const std::size_t undo_before_rejections = shell_state.session.undo_count();
+        const std::vector<std::vector<marrow::editor::MeshWeightInfluenceEdit>> rejected_inputs{
+            {{"no_such_bone", 0.0, 0.0, 1.0}},
+            {{"spine", std::numeric_limits<double>::quiet_NaN(), 0.0, 1.0}},
+            {{"spine", 0.0, 0.0, std::numeric_limits<double>::infinity()}},
+            {{"spine", 0.0, 0.0, 0.0}, {"arm_l", 0.0, 0.0, -1.0}},
+            {},
+        };
+        for (const auto& rejected : rejected_inputs) {
+            if (set_active_vertex_weights_command(&shell_state, 1U, rejected)) {
+                std::cerr << "An invalid numeric influence commit must be refused.\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*shell_state.load_result.project) !=
+                    project_before_rejections ||
+                shell_state.session.undo_count() != undo_before_rejections) {
+                std::cerr << "A refused weight edit must leave the project byte-identical.\n";
+                return false;
+            }
+        }
+
+        // AC1/AC6 cross-path identity: the brush, the numeric table, and the
+        // project primitive driven to the same intended influence set must
+        // produce a bit-identical vertex. This is the assertion that proves the
+        // paths share one implementation rather than merely agreeing today.
+        if (!set_active_vertex_weights_command(
+                &shell_state,
+                2U,
+                {{"spine", 11.0, 22.0, 0.6}, {"arm_l", 33.0, 44.0, 0.2}})) {
+            std::cerr << "Cross-path identity setup failed on the numeric path.\n";
+            return false;
+        }
+        const std::string numeric_path_vertex = vertex_snapshot(2U);
+        {
+            marrow::editor::ProjectData primitive_project = *shell_state.load_result.project;
+            const std::optional<MeshWeightPaintTarget> identity_target = current_weight_target();
+            if (!identity_target.has_value() || identity_target->source_attachment == nullptr) {
+                std::cerr << "Cross-path identity could not resolve the target.\n";
+                return false;
+            }
+            marrow::editor::MeshWeightVertexEdit intended;
+            intended.influences = {{"spine", 11.0, 22.0, 0.6}, {"arm_l", 33.0, 44.0, 0.2}};
+            const auto primitive_result = marrow::editor::set_mesh_vertex_weights(
+                &primitive_project,
+                *shell_state.load_result.skeleton_data,
+                *identity_target->source_attachment,
+                marrow::editor::MeshWeightTarget{"mesh_base", "body", "body_mesh"},
+                {{2U, intended}});
+            if (!primitive_result) {
+                std::cerr << "Cross-path identity failed on the primitive path.\n";
+                return false;
+            }
+            const marrow::editor::MeshWeightAttachmentEdit* primitive_edit =
+                primitive_project.find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (const auto& influence : primitive_edit->vertices[2].influences) {
+                stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                       << ',' << influence.y << ';';
+            }
+            if (stream.str() != numeric_path_vertex) {
+                std::cerr << "The numeric table and the project primitive disagreed: \""
+                          << numeric_path_vertex << "\" vs \"" << stream.str() << "\".\n";
+                return false;
+            }
+        }
+        // The brush drives the same vertex to the same intended set through the
+        // pure layer only, with no ProjectData transaction at all.
+        {
+            marrow::editor::MeshWeightVertexEdit brush_vertex;
+            brush_vertex.influences = {{"spine", 11.0, 22.0, 0.6}, {"arm_l", 33.0, 44.0, 0.2}};
+            if (!marrow::editor::mesh_weight_model::canonicalize_mesh_weight_vertex(
+                     *shell_state.load_result.skeleton_data, &brush_vertex)
+                     .empty()) {
+                std::cerr << "Cross-path identity failed on the brush's pure layer.\n";
+                return false;
+            }
+            std::ostringstream stream;
+            stream << std::setprecision(17);
+            for (const auto& influence : brush_vertex.influences) {
+                stream << influence.bone_name << '=' << influence.weight << '@' << influence.x
+                       << ',' << influence.y << ';';
+            }
+            if (stream.str() != numeric_path_vertex) {
+                std::cerr << "The brush's canonical layer and the numeric table disagreed.\n";
+                return false;
+            }
+        }
+        std::cout << "  MAR-175 cross-path identity: brush, numeric table, and the project "
+                     "primitive all produced " << numeric_path_vertex << '\n';
+
+        // Save/reload round trip: canonical output is a fixed point of the
+        // .marrow loader, and -- the V1/V2 regression guard -- an accepted
+        // weight write always produces a SAVABLE project.
+        {
+            marrow::editor::ProjectData round_trip = *shell_state.load_result.project;
+            round_trip.source_path = "/tmp/marrow_mar175_weight_round_trip.marrow";
+            materialize_temp_project_runtime_assets(shell_state, &round_trip);
+            const auto saved =
+                marrow::editor::save_project(round_trip, round_trip.source_path);
+            if (!saved) {
+                std::cerr << "An accepted weight edit produced an UNSAVABLE project: "
+                          << saved.error->format() << '\n';
+                return false;
+            }
+            const auto reloaded = marrow::editor::load_project(round_trip.source_path);
+            if (!reloaded) {
+                std::cerr << "The saved weight project failed to reload.\n";
+                return false;
+            }
+            const marrow::editor::MeshWeightAttachmentEdit* saved_edit =
+                shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            const marrow::editor::MeshWeightAttachmentEdit* loaded_edit =
+                reloaded.project->find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+            if (saved_edit == nullptr || loaded_edit == nullptr ||
+                saved_edit->vertices.size() != loaded_edit->vertices.size()) {
+                std::cerr << "The reloaded project lost the weight overlay.\n";
+                return false;
+            }
+            for (std::size_t vertex = 0; vertex < saved_edit->vertices.size(); ++vertex) {
+                const auto& before = saved_edit->vertices[vertex].influences;
+                const auto& after = loaded_edit->vertices[vertex].influences;
+                if (before.size() != after.size()) {
+                    std::cerr << "The reloaded project changed an influence count.\n";
+                    return false;
+                }
+                for (std::size_t index = 0; index < before.size(); ++index) {
+                    // .marrow serializes at 15 significant digits, so identity
+                    // here is decimal-round-trip identity, not bit identity.
+                    if (before[index].bone_name != after[index].bone_name ||
+                        !require_weight_near(after[index].weight, before[index].weight, 1e-12, "reloaded weight")) {
+                        std::cerr << "The reloaded weight vertex did not round-trip.\n";
+                        return false;
+                    }
+                }
+            }
+            std::remove(round_trip.source_path.c_str());
+        }
+
+        // ── MAR-176: deterministic automatic weight generation ──────────────
+        //
+        // Earlier cases in this block rewrote these vertices, so restore the
+        // fixture's authored influences first. The exact 0.5/0.5 tie asserted
+        // below is a property of WHERE the vertex sits -- past spine's segment
+        // end and behind arm_l's segment start, so both clamp to spine's world
+        // origin -- and asserting it against whatever the previous case left
+        // behind would be asserting nothing.
+        if (!set_active_vertex_weights_command(
+                &shell_state, 0U, {{"spine", -64.0, -80.0, 1.0}}) ||
+            !set_active_vertex_weights_command(
+                &shell_state,
+                2U,
+                {{"spine", 64.0, 80.0, 0.2}, {"arm_l", 94.0, 70.0, 0.6}})) {
+            std::cerr << "MAR-176 could not restore the fixture weights before generating.\n";
+            return false;
+        }
+        shell_state.session.clear_history();
+        shell_state.pending_edit_action.reset();
+        update_project_dirty_state(&shell_state);
+        {
+            const std::string project_before_generate =
+                marrow::editor::serialize_project(*shell_state.load_result.project);
+            const std::string all_before_generate = weight_edit_snapshot();
+
+            // AC1 on the GUI: an empty checklist rejects. It must never fall
+            // back to "every bone" -- that is the silent expansion the story
+            // forbids, and it is the one place a convenience default would
+            // violate an acceptance criterion outright.
+            shell_state.weight_paint.candidate_bone_names.clear();
+            if (generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 Generate must refuse an empty candidate checklist.\n";
+                return false;
+            }
+            if (shell_state.error_message !=
+                "mesh.generate_weights requires at least one candidate bone.") {
+                // Asserted so this case cannot pass merely because the target
+                // failed to resolve for some unrelated reason.
+                std::cerr << "MAR-176 the empty-checklist refusal must name the candidate rule, "
+                             "but said \"" << shell_state.error_message << "\".\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*shell_state.load_result.project) !=
+                    project_before_generate ||
+                shell_state.session.undo_count() != 0U) {
+                std::cerr << "MAR-176 a refused Generate must leave the project byte-identical.\n";
+                return false;
+            }
+
+            // `From selection` is a one-shot fill: the checklist is built from
+            // the bone selection once, and the generate that follows uses
+            // exactly those two bones.
+            shell_state.selection.clear();
+            shell_state.selection.add_range(
+                {marrow::editor::BoneSelection{"spine"}, marrow::editor::BoneSelection{"arm_l"}},
+                marrow::editor::BoneSelection{"spine"});
+            {
+                std::vector<std::string> filled;
+                for (const auto& bone : shell_state.load_result.skeleton_data->bones()) {
+                    for (const auto& item : shell_state.selection.items()) {
+                        const auto* selected =
+                            std::get_if<marrow::editor::BoneSelection>(&item);
+                        if (selected != nullptr && selected->bone_name == bone.name) {
+                            filled.push_back(bone.name);
+                            break;
+                        }
+                    }
+                }
+                shell_state.weight_paint.candidate_bone_names = filled;
+            }
+            if (shell_state.weight_paint.candidate_bone_names !=
+                std::vector<std::string>{"spine", "arm_l"}) {
+                std::cerr << "MAR-176 From selection must fill the checklist in skeleton order "
+                             "with exactly the selected bones.\n";
+                return false;
+            }
+            // Clearing the selection afterwards must NOT change the checklist:
+            // the fill is one-shot, not a live binding.
+            shell_state.selection.clear();
+            if (shell_state.weight_paint.candidate_bone_names !=
+                std::vector<std::string>{"spine", "arm_l"}) {
+                std::cerr << "MAR-176 the candidate checklist must not track the selection.\n";
+                return false;
+            }
+            // Selecting bones replaced the slot selection the weight target
+            // resolves through, so restore it before driving any command.
+            select_slot(&shell_state, *body_slot_index, "Smoke", false);
+
+            // A rejection for a candidate that no longer resolves.
+            shell_state.weight_paint.candidate_bone_names = {"spine", "ghost_bone"};
+            if (generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 Generate must refuse an unresolvable candidate name.\n";
+                return false;
+            }
+            if (marrow::editor::serialize_project(*shell_state.load_result.project) !=
+                    project_before_generate ||
+                shell_state.session.undo_count() != 0U) {
+                std::cerr << "MAR-176 an unresolvable-candidate rejection must change nothing.\n";
+                return false;
+            }
+            shell_state.weight_paint.candidate_bone_names = {"spine", "arm_l"};
+
+            // Scoped: a two-vertex FFD selection narrows the command to exactly
+            // those two, and the other two must survive byte-identical.
+            const std::optional<MeshWeightPaintTarget> generate_target = current_weight_target();
+            if (!generate_target.has_value()) {
+                std::cerr << "MAR-176 could not resolve the weight target.\n";
+                return false;
+            }
+            ViewportFfdSelection ffd;
+            ffd.scope.slot_index = generate_target->slot_index;
+            ffd.scope.deform_attachment_name = generate_target->source_attachment_name;
+            ffd.scope.vertex_count = 4U;
+            ffd.vertex_indices = {0U, 1U};
+            shell_state.viewport_ffd_selection = ffd;
+            if (weight_command_scope(shell_state) != std::vector<std::size_t>{0U, 1U}) {
+                std::cerr << "MAR-176 the FFD selection did not narrow the generate scope.\n";
+                return false;
+            }
+            const std::string scoped_v2_before = vertex_snapshot(2U);
+            const std::string scoped_v3_before = vertex_snapshot(3U);
+            const std::string scoped_v0_before = vertex_snapshot(0U);
+            if (!generate_weights_command(&shell_state) ||
+                shell_state.session.undo_count() != 1U) {
+                std::cerr << "MAR-176 a scoped Generate must be exactly one history entry.\n";
+                return false;
+            }
+            if (vertex_snapshot(2U) != scoped_v2_before ||
+                vertex_snapshot(3U) != scoped_v3_before) {
+                std::cerr << "MAR-176 a scoped Generate disturbed a vertex outside the scope.\n";
+                return false;
+            }
+            if (!undo_project_change(&shell_state) || vertex_snapshot(0U) != scoped_v0_before) {
+                std::cerr << "MAR-176 undoing a Generate must restore the influences "
+                             "bit-exactly.\n";
+                return false;
+            }
+            shell_state.viewport_ffd_selection.reset();
+            shell_state.session.clear_history();
+            update_project_dirty_state(&shell_state);
+
+            // Unscoped: every vertex, one history entry.
+            if (!generate_weights_command(&shell_state) ||
+                shell_state.session.undo_count() != 1U) {
+                std::cerr << "MAR-176 an unscoped Generate must be exactly one history entry.\n";
+                return false;
+            }
+            const std::string generated_at_setup = weight_edit_snapshot();
+            if (generated_at_setup == all_before_generate) {
+                std::cerr << "MAR-176 an unscoped Generate changed nothing at all.\n";
+                return false;
+            }
+            // Vertex 2's candidates are exactly equidistant -- both clamp to
+            // spine's world origin -- so the weights are exactly one half each
+            // and the tie breaks on ascending skeleton index.
+            {
+                const marrow::editor::MeshWeightAttachmentEdit* edit =
+                    shell_state.load_result.project->find_mesh_weight_attachment_edit(
+                        "mesh_base", "body", "body_mesh");
+                if (edit == nullptr || edit->vertices[2].influences.size() != 2U ||
+                    edit->vertices[2].influences[0].bone_name != "spine" ||
+                    edit->vertices[2].influences[1].bone_name != "arm_l" ||
+                    edit->vertices[2].influences[0].weight != 0.5 ||
+                    edit->vertices[2].influences[1].weight != 0.5) {
+                    std::cerr << "MAR-176 vertex 2 must generate exactly spine 0.5 then arm_l "
+                                 "0.5, but generated " << vertex_snapshot(2U) << ".\n";
+                    return false;
+                }
+            }
+            // A Generate whose scope changes nothing records no history entry
+            // and does not dirty -- the GUI analogue of the agent's no_change.
+            const std::size_t undo_after_generate = shell_state.session.undo_count();
+            if (!generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 a repeated Generate must not fail.\n";
+                return false;
+            }
+            std::cout << "  MAR-176 note: a repeated Generate on its own output added "
+                      << (shell_state.session.undo_count() - undo_after_generate)
+                      << " history entr(y/ies) -- generation is deterministic but not "
+                         "bit-exactly idempotent, so either 0 or 1 is correct here and "
+                         "neither is asserted.\n";
+            while (shell_state.session.undo_count() > undo_after_generate) {
+                if (!undo_project_change(&shell_state)) {
+                    std::cerr << "MAR-176 could not unwind the repeated Generate.\n";
+                    return false;
+                }
+            }
+
+            // ── Pose independence, the direct descendant of MAR-175's D9 ──
+            //
+            // The algorithm reads only the setup pose, so scrubbing the playhead
+            // off setup must not move a single bit of the result.
+            if (!undo_project_change(&shell_state)) {
+                std::cerr << "MAR-176 could not restore the pre-generate state.\n";
+                return false;
+            }
+            shell_state.session.clear_history();
+            update_project_dirty_state(&shell_state);
+            if (!set_selected_animation(&shell_state, "attack", "Smoke", false, true) ||
+                !scrub_timeline_time(&shell_state, 0.2, "Smoke", false)) {
+                std::cerr << "MAR-176 could not scrub to attack@0.2 for the pose check.\n";
+                return false;
+            }
+            if (!generate_weights_command(&shell_state)) {
+                std::cerr << "MAR-176 Generate failed while the playhead was off setup pose.\n";
+                return false;
+            }
+            const std::string generated_off_pose = weight_edit_snapshot();
+            if (generated_off_pose != generated_at_setup) {
+                std::cerr << "MAR-176 generating at attack@0.2 must be bit-identical to "
+                             "generating at setup pose.\n  setup: " << generated_at_setup
+                          << "\n  posed: " << generated_off_pose << '\n';
+                return false;
+            }
+            std::cout << "  MAR-176 pose independence: generating at attack@0.2 is "
+                         "bit-identical to generating at setup pose.\n";
+
+            // ── Cross-path identity: the GUI command and the project primitive
+            // must produce a bit-identical vertex ──
+            {
+                marrow::editor::ProjectData primitive_project =
+                    *shell_state.load_result.project;
+                if (!undo_project_change(&shell_state)) {
+                    std::cerr << "MAR-176 could not unwind before the cross-path check.\n";
+                    return false;
+                }
+                marrow::editor::ProjectData primitive_source =
+                    *shell_state.load_result.project;
+                const auto primitive_result = marrow::editor::generate_mesh_weights(
+                    &primitive_source,
+                    *shell_state.load_result.skeleton_data,
+                    *generate_target->source_attachment,
+                    marrow::editor::MeshWeightTarget{"mesh_base", "body", "body_mesh"},
+                    {"spine", "arm_l"},
+                    {});
+                if (!primitive_result) {
+                    std::cerr << "MAR-176 cross-path identity failed on the primitive path: "
+                              << primitive_result.error << '\n';
+                    return false;
+                }
+                const auto* gui_edit = primitive_project.find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+                const auto* primitive_edit = primitive_source.find_mesh_weight_attachment_edit(
+                    "mesh_base", "body", "body_mesh");
+                if (gui_edit == nullptr || primitive_edit == nullptr ||
+                    gui_edit->vertices.size() != primitive_edit->vertices.size()) {
+                    std::cerr << "MAR-176 cross-path identity lost an overlay.\n";
+                    return false;
+                }
+                for (std::size_t vertex = 0; vertex < gui_edit->vertices.size(); ++vertex) {
+                    const auto& lhs = gui_edit->vertices[vertex].influences;
+                    const auto& rhs = primitive_edit->vertices[vertex].influences;
+                    if (lhs.size() != rhs.size()) {
+                        std::cerr << "MAR-176 the GUI command and mesh.generate_weights "
+                                     "disagreed on vertex " << vertex << "'s influence count.\n";
+                        return false;
+                    }
+                    for (std::size_t index = 0; index < lhs.size(); ++index) {
+                        if (lhs[index].bone_name != rhs[index].bone_name ||
+                            lhs[index].weight != rhs[index].weight ||
+                            lhs[index].x != rhs[index].x || lhs[index].y != rhs[index].y) {
+                            std::cerr << std::setprecision(17)
+                                      << "MAR-176 the GUI command and the project primitive "
+                                         "produced different influences at vertex " << vertex
+                                      << ".\n";
+                            return false;
+                        }
+                    }
+                }
+                std::cout << "  MAR-176 cross-path identity: the GUI Generate command and "
+                             "generate_mesh_weights() produced a bit-identical overlay.\n";
+            }
+            shell_state.weight_paint.candidate_bone_names.clear();
+            shell_state.session.clear_history();
+            shell_state.pending_edit_action.reset();
+            update_project_dirty_state(&shell_state);
+        }
+
+        if (!apply_history_snapshot(&shell_state, weight_paint_baseline) ||
+            !apply_current_animation_state_to_preview(&shell_state)) {
+            std::cerr << "Weight paint smoke could not restore the baseline after MAR-175 coverage.\n";
+            return false;
+        }
+        shell_state.weight_paint.strength = 1.0f;
+        shell_state.weight_paint.mode = WeightPaintMode::Paint;
         reset_weight_paint_stroke(&shell_state);
         shell_state.weight_paint.enabled = false;
         shell_state.session.clear_history();
@@ -2067,7 +2948,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     if (const auto arm_index = shell_state.load_result.skeleton_data->find_bone_index("arm_l")) {
         const double mixed_rotation =
             static_cast<double>(
-                shell_state.preview_skeleton->bone_poses()[*arm_index].local_pose.rotation);
+                shell_state.preview_skeleton()->bone_poses()[*arm_index].local_pose.rotation);
         if (std::abs(mixed_rotation - 45.0) > 1e-3) {
             std::cerr << "State preview smoke did not apply the queued mix pose.\n";
             return false;
@@ -2167,9 +3048,9 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     }
 
     const auto& ik_tip_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*ik_tip_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*ik_tip_index];
     const auto& ik_target_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*ik_target_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*ik_target_index];
     const double setup_ik_tip_x = -40.0;
     const double setup_ik_tip_y = 140.0;
     const double setup_ik_distance = std::hypot(
@@ -2184,11 +3065,11 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     }
 
     const auto& path_a_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*path_a_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*path_a_index];
     const auto& path_b_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*path_b_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*path_b_index];
     const auto& path_c_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*path_c_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*path_c_index];
     if (!require_smoke_near(
             path_a_world.world_x,
             20.0,
@@ -2236,7 +3117,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     const double transform_y_radians =
         (expected_transform_rotation + 90.0 + expected_transform_shear_y) * kPi / 180.0;
     const auto& transform_target_world =
-        shell_state.preview_skeleton->bone_world_transforms()[*transform_target_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*transform_target_index];
     if (!require_smoke_near(
             transform_target_world.world_x,
             expected_transform_x,
@@ -2272,7 +3153,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
     }
 
     const auto& setup_ribbon_tip =
-        shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
+        shell_state.preview_skeleton()->bone_world_transforms()[*ribbon_tip_index];
     if (!require_smoke_near(
             setup_ribbon_tip.world_x,
             230.0,
@@ -2372,11 +3253,11 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto& edited_path_a_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*path_a_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*path_a_index];
         const auto& edited_path_b_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*path_b_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*path_b_index];
         const auto& edited_path_c_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*path_c_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*path_c_index];
         if (!require_smoke_near(
                 edited_path_a_world.world_x,
                 0.0,
@@ -2412,7 +3293,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
         }
 
         const auto& edited_transform_target_world =
-            shell_state.preview_skeleton->bone_world_transforms()[*transform_target_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*transform_target_index];
         if (!require_smoke_near(
                 edited_transform_target_world.world_x,
                 200.0,
@@ -2427,13 +3308,13 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
 
-        shell_state.preview_skeleton->bone_poses()[*pivot_index].local_pose.rotation = 90.0;
-        shell_state.preview_skeleton->update_world_transforms();
+        shell_state.preview_skeleton()->bone_poses()[*pivot_index].local_pose.rotation = 90.0;
+        shell_state.preview_skeleton()->update_world_transforms();
         const auto lagged_ribbon_tip =
-            shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
-        shell_state.preview_skeleton->update_physics(1.0 / 60.0);
+            shell_state.preview_skeleton()->bone_world_transforms()[*ribbon_tip_index];
+        shell_state.preview_skeleton()->update_physics(1.0 / 60.0);
         const auto stepped_ribbon_tip =
-            shell_state.preview_skeleton->bone_world_transforms()[*ribbon_tip_index];
+            shell_state.preview_skeleton()->bone_world_transforms()[*ribbon_tip_index];
         const double preview_physics_motion = std::hypot(
             static_cast<double>(stepped_ribbon_tip.world_x - lagged_ribbon_tip.world_x),
             static_cast<double>(stepped_ribbon_tip.world_y - lagged_ribbon_tip.world_y));
@@ -2679,7 +3560,7 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
                     shell_state.load_result.skeleton_data->transform_constraints(),
                     "editor_transform_follow");
                 const auto* overridden_attachment =
-                    shell_state.preview_skeleton->current_attachment(*body_slot_index);
+                    shell_state.preview_skeleton()->current_attachment(*body_slot_index);
                 const bool warrior_enabled = std::find(
                     shell_state.preview_skin_names.begin(),
                     shell_state.preview_skin_names.end(),
@@ -2782,6 +3663,1299 @@ bool validate_timeline_project_smoke(ShellState& shell_state) {
             return false;
         }
     }
+    return true;
+}
+
+// ---------------------------------------------------------------------
+// MAR-174 transient preview playback speed.
+//
+// The feature is one multiply at one site, so the scenario's weight sits on
+// the negative: a speed change must leave the serialized project, the history,
+// every session revision, and the exported runtime assets byte-identical.
+// ---------------------------------------------------------------------
+bool validate_preview_playback_speed_shell_smoke(
+    const std::filesystem::path& project_path) {
+    // Every scenario that touches the preference store isolates it, so a smoke
+    // run can never create, read, or write the real preference directory.
+    using TransformChannel = marrow::editor::TransformTimelineChannel;
+
+    const ScopedPreferenceIsolation isolation("preview-speed");
+    if (!isolation.installed()) {
+        std::cerr << "Preview speed shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = project_path;
+    if (!reload_project(&state) ||
+        !set_selected_animation(&state, "idle", "Preview speed smoke", false, true)) {
+        std::cerr << "Preview speed shell smoke could not load player_idle/idle.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 66U) {
+        std::cerr << "Preview speed shell smoke requires the exact 66-operation registry.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    const auto near_time = [](double left, double right) {
+        return std::abs(left - right) <= 1e-9;
+    };
+    const auto set_speed = [&](double speed) {
+        return set_preview_playback_speed(&state, speed, "Preview speed smoke", false);
+    };
+    const auto seek = [&](double time_seconds) {
+        return scrub_timeline_time(&state, time_seconds, "Preview speed smoke", false);
+    };
+    const auto idle_duration = [&]() -> double {
+        const auto* animation = state.session.runtime_data() != nullptr
+            ? state.session.runtime_data()->find_animation("idle")
+            : nullptr;
+        return animation != nullptr ? animation->duration() : -1.0;
+    };
+    const auto spine_index = state.load_result.skeleton_data->find_bone_index("spine");
+    if (!spine_index.has_value()) {
+        std::cerr << "Preview speed smoke needs the fixture's spine bone.\n";
+        return false;
+    }
+    const auto spine_pose = [&]() {
+        return state.preview_skeleton()->bone_poses()[*spine_index].local_pose;
+    };
+    const auto poses_match = [](const marrow::runtime::BoneTransform& left,
+                                const marrow::runtime::BoneTransform& right) {
+        return std::abs(left.rotation - right.rotation) <= 1e-6f &&
+            std::abs(left.x - right.x) <= 1e-6f &&
+            std::abs(left.y - right.y) <= 1e-6f;
+    };
+
+    // Every numeric expectation below is derived from this duration.
+    if (idle_duration() != 1.0) {
+        std::cerr << "Preview speed smoke needs idle's inferred 1.0s duration, found "
+                  << idle_duration() << ".\n";
+        return false;
+    }
+
+    // --- The value domain --------------------------------------------------
+    {
+        const ShellState fresh;
+        if (fresh.preview_speed != kDefaultPreviewSpeed ||
+            state.preview_speed != kDefaultPreviewSpeed) {
+            std::cerr << "A fresh and a reloaded shell must both start at the one "
+                         "documented default preview speed.\n";
+            return false;
+        }
+    }
+
+    struct ClampCase {
+        double input;
+        double expected;
+    };
+    // Finite out-of-range values clamp, which is the house idiom for transient
+    // preview scalars. Zero and negatives are simply below the floor: zero is
+    // not a pause and a negative is never a reverse.
+    const ClampCase clamp_cases[] = {
+        {0.0, kPreviewSpeedMinimum},
+        {-3.0, kPreviewSpeedMinimum},
+        {100.0, kPreviewSpeedMaximum},
+        {kPreviewSpeedMinimum, kPreviewSpeedMinimum},
+        {kPreviewSpeedMaximum, kPreviewSpeedMaximum},
+        {3.75, 3.75},
+    };
+    for (const ClampCase& item : clamp_cases) {
+        if (!set_speed(item.input) || state.preview_speed != item.expected) {
+            std::cerr << "Preview speed " << item.input << " must resolve to "
+                      << item.expected << ", got " << state.preview_speed << ".\n";
+            return false;
+        }
+    }
+    // The presets are shortcuts onto the continuous domain, not the domain.
+    for (const double preset : kPreviewSpeedPresets) {
+        if (preset < kPreviewSpeedMinimum || preset > kPreviewSpeedMaximum ||
+            !set_speed(preset) || state.preview_speed != preset) {
+            std::cerr << "Preset " << preset
+                      << " must lie inside the accepted range and assign exactly.\n";
+            return false;
+        }
+    }
+
+    // A non-finite request is rejected with the field bit-unchanged. memcmp,
+    // not ==, so a NaN write can never pass this.
+    const double accepted_speed = state.preview_speed;
+    for (const double rejected : {std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::infinity(),
+                                  -std::numeric_limits<double>::infinity()}) {
+        if (set_preview_playback_speed(&state, rejected, "Preview speed smoke", true) ||
+            std::memcmp(&state.preview_speed, &accepted_speed, sizeof(double)) != 0) {
+            std::cerr << "A non-finite preview speed must be rejected and leave the "
+                         "field bit-unchanged.\n";
+            return false;
+        }
+    }
+
+    // The accessor is an independent second clamp, so even a directly poked
+    // field can never reach EditorSession::advance().
+    state.preview_speed = std::numeric_limits<double>::quiet_NaN();
+    const bool accessor_rejects_nan =
+        preview_playback_speed(state) == kDefaultPreviewSpeed;
+    state.preview_speed = 1000.0;
+    const bool accessor_clamps_high =
+        preview_playback_speed(state) == kPreviewSpeedMaximum;
+    state.preview_speed = -1000.0;
+    const bool accessor_clamps_low =
+        preview_playback_speed(state) == kPreviewSpeedMinimum;
+    if (!accessor_rejects_nan || !accessor_clamps_high || !accessor_clamps_low) {
+        std::cerr << "preview_playback_speed() must clamp a corrupted field at the "
+                     "point of use.\n";
+        return false;
+    }
+    if (!set_speed(kDefaultPreviewSpeed)) {
+        std::cerr << "Preview speed smoke could not restore its default speed.\n";
+        return false;
+    }
+
+    // --- Forward progression ----------------------------------------------
+    state.preview_reverse = false;
+    state.timeline_loop = true;
+    state.timeline_playing = true;
+    if (!refresh_preview_pose(&state)) {
+        std::cerr << "Preview speed smoke could not arm looped forward playback.\n";
+        return false;
+    }
+
+    struct AdvanceCase {
+        double speed;
+        double expected_time;
+    };
+    const AdvanceCase advance_cases[] = {
+        {1.0, 0.25},
+        {2.0, 0.5},
+        {0.25, 0.0625},
+        {0.5, 0.125},
+        {8.0, 0.0},  // fmod(2.0, 1.0): two whole periods in one step
+        {0.05, 0.0125},
+    };
+    for (const AdvanceCase& item : advance_cases) {
+        state.timeline_playing = true;
+        if (!seek(0.0) || !set_speed(item.speed)) {
+            std::cerr << "Preview speed smoke could not arm speed " << item.speed << ".\n";
+            return false;
+        }
+        advance_timeline_playback(&state, 0.25);
+        if (!near_time(state.timeline_time_seconds, item.expected_time)) {
+            std::cerr << "A 0.25s frame at " << item.speed << "x must reach "
+                      << item.expected_time << "s, got "
+                      << state.timeline_time_seconds << "s.\n";
+            return false;
+        }
+    }
+
+    // The equivalence law: speed multiplies the delta and nothing else, so N
+    // frames at (s, d) must land exactly where N frames at (1, s*d) land.
+    for (const double speed : {0.25, 2.0}) {
+        state.timeline_playing = true;
+        if (!seek(0.0) || !set_speed(speed)) {
+            std::cerr << "Preview speed smoke could not arm its equivalence walk.\n";
+            return false;
+        }
+        for (int step = 0; step < 3; ++step) {
+            advance_timeline_playback(&state, 0.25);
+        }
+        const double scaled_time = state.timeline_time_seconds;
+
+        state.timeline_playing = true;
+        if (!seek(0.0) || !set_speed(kDefaultPreviewSpeed)) {
+            std::cerr << "Preview speed smoke could not arm its reference walk.\n";
+            return false;
+        }
+        for (int step = 0; step < 3; ++step) {
+            advance_timeline_playback(&state, 0.25 * speed);
+        }
+        if (!near_time(scaled_time, state.timeline_time_seconds)) {
+            std::cerr << "Three frames at " << speed << "x reached " << scaled_time
+                      << "s but three scaled frames at 1x reached "
+                      << state.timeline_time_seconds << "s.\n";
+            return false;
+        }
+    }
+
+    // --- Reverse: speed is a magnitude, direction stays preview_reverse -----
+    state.preview_reverse = false;
+    state.timeline_playing = false;
+    if (!refresh_preview_pose(&state) || !seek(0.3)) {
+        std::cerr << "Preview speed smoke could not sample its forward reference.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform forward_at_030 = spine_pose();
+    if (!seek(0.7)) {
+        std::cerr << "Preview speed smoke could not sample its mirrored reference.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform forward_at_070 = spine_pose();
+    if (poses_match(forward_at_030, forward_at_070)) {
+        std::cerr << "The fixture must distinguish 0.3s from 0.7s for the reverse proof.\n";
+        return false;
+    }
+
+    state.preview_reverse = true;
+    state.timeline_loop = true;
+    state.timeline_playing = true;
+    if (!refresh_preview_pose(&state) || !seek(0.0) || !set_speed(2.0)) {
+        std::cerr << "Preview speed smoke could not arm reversed playback at 2x.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.15);
+    if (!near_time(state.timeline_time_seconds, 0.3)) {
+        std::cerr << "Reverse must not change the track-time progression: expected "
+                     "0.3s at 2x, got " << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform reverse_at_030 = spine_pose();
+    if (poses_match(reverse_at_030, forward_at_030) ||
+        !poses_match(reverse_at_030, forward_at_070)) {
+        std::cerr << "At 2x reversed, track time 0.3s must sample the forward pose at "
+                     "0.7s and not the forward pose at 0.3s.\n";
+        return false;
+    }
+    state.preview_reverse = false;
+    if (!refresh_preview_pose(&state)) {
+        std::cerr << "Preview speed smoke could not clear reverse.\n";
+        return false;
+    }
+
+    // --- Loop: one exact fmod, so a multi-period step cannot drift ----------
+    state.timeline_loop = true;
+    state.timeline_playing = false;
+    if (!refresh_preview_pose(&state) || !set_speed(kDefaultPreviewSpeed) || !seek(0.9)) {
+        std::cerr << "Preview speed smoke could not sample its loop reference.\n";
+        return false;
+    }
+    const marrow::runtime::BoneTransform reference_at_090 = spine_pose();
+    state.timeline_playing = true;
+    if (!seek(0.9) || !set_speed(8.0)) {
+        std::cerr << "Preview speed smoke could not arm its multi-period step.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.25);  // +2.0s across two whole periods
+    if (!near_time(state.timeline_time_seconds, 0.9) || !state.timeline_playing ||
+        !poses_match(spine_pose(), reference_at_090)) {
+        std::cerr << "A two-period step at 8x must land back on 0.9s and on the same "
+                     "pose, got " << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+
+    // --- Non-loop: speed reaches the end sooner, never past it --------------
+    state.timeline_loop = false;
+    state.timeline_playing = true;
+    if (!refresh_preview_pose(&state) || !seek(0.9) || !set_speed(8.0)) {
+        std::cerr << "Preview speed smoke could not arm its non-looping clamp.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.25);
+    if (state.timeline_time_seconds != idle_duration() || state.timeline_playing) {
+        std::cerr << "A non-looping 8x step must stop at exactly the duration, got "
+                  << state.timeline_time_seconds << "s playing="
+                  << state.timeline_playing << ".\n";
+        return false;
+    }
+
+    // --- Scrubbing is an absolute position, so speed does not touch it ------
+    state.timeline_loop = true;
+    state.timeline_playing = false;
+    if (!refresh_preview_pose(&state) || !set_speed(8.0) || !seek(0.3) ||
+        state.timeline_time_seconds != 0.3) {
+        std::cerr << "A scrub at 8x must land on its exact requested time, got "
+                  << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+
+    // --- Pause is timeline_playing, at every speed --------------------------
+    // 0.05 at 8x would reach 0.7, matching the resume case below. A 0.25 delta
+    // reaches exactly two periods of the 1.0s clip, so a broken pause guard
+    // would land on fmod(2.3, 1.0) == 0.2999999999999998 and this exact
+    // comparison would bite by 1.67e-16 of floating-point residue rather than
+    // by design.
+    advance_timeline_playback(&state, 0.05);
+    if (state.timeline_time_seconds != 0.3) {
+        std::cerr << "A paused transport must not advance at any speed.\n";
+        return false;
+    }
+    state.timeline_playing = true;
+    if (!seek(0.3)) {
+        std::cerr << "Preview speed smoke could not resume playback.\n";
+        return false;
+    }
+    advance_timeline_playback(&state, 0.05);
+    if (!near_time(state.timeline_time_seconds, 0.7)) {
+        std::cerr << "Resuming must advance by delta * speed from the paused time: "
+                     "expected 0.7s, got " << state.timeline_time_seconds << "s.\n";
+        return false;
+    }
+
+    // --- The non-effect gate ------------------------------------------------
+    state.timeline_playing = false;
+    state.timeline_loop = true;
+    state.preview_reverse = false;
+    // The speed goes back to its default FIRST and the ordinary preview path
+    // settles the session LAST, so the baseline below can never be poisoned by
+    // the very setter under test.
+    if (!set_speed(kDefaultPreviewSpeed) || !refresh_preview_pose(&state) ||
+        !seek(0.0)) {
+        std::cerr << "Preview speed smoke could not settle before its non-effect gate.\n";
+        return false;
+    }
+    if (state.session.preview_state().playing) {
+        std::cerr << "Preview speed smoke needs a settled, paused session before its gate.\n";
+        return false;
+    }
+    update_project_dirty_state(&state);
+    if (state.project_dirty || state.session.dirty()) {
+        std::cerr << "Preview speed smoke needs a clean project before its gate.\n";
+        return false;
+    }
+
+    const auto file_bytes = [](const std::filesystem::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string(
+            std::istreambuf_iterator<char>(stream),
+            std::istreambuf_iterator<char>());
+    };
+    const auto export_pair = [&](std::string_view stem,
+                                 std::filesystem::path* skeleton_out,
+                                 std::filesystem::path* binary_out) {
+        marrow::editor::ProjectExportOptions options;
+        options.skeleton_output_path = isolation.path() / (std::string(stem) + ".mskl");
+        options.binary_output_path = isolation.path() / (std::string(stem) + ".mbin");
+        const auto exported = marrow::editor::export_runtime_assets(
+            *state.session.project(),
+            *state.session.base_skeleton_document(),
+            options);
+        if (!exported) {
+            std::cerr << exported.error->format() << '\n';
+            return false;
+        }
+        *skeleton_out = options.skeleton_output_path;
+        *binary_out = *options.binary_output_path;
+        return true;
+    };
+
+    std::filesystem::path skeleton_before;
+    std::filesystem::path binary_before;
+    if (!export_pair("mar174-before", &skeleton_before, &binary_before)) {
+        std::cerr << "Preview speed smoke could not export its baseline runtime assets.\n";
+        return false;
+    }
+    const std::string skeleton_bytes_before = file_bytes(skeleton_before);
+    const std::string binary_bytes_before = file_bytes(binary_before);
+    if (skeleton_bytes_before.empty() || binary_bytes_before.empty()) {
+        std::cerr << "Preview speed smoke exported empty runtime assets, so its "
+                     "byte-identity gate would be vacuous.\n";
+        return false;
+    }
+
+    const std::string project_before =
+        marrow::editor::serialize_project(*state.session.project());
+    const std::size_t undo_before = state.session.undo_count();
+    const std::size_t redo_before = state.session.redo_count();
+    const std::uint64_t project_revision_before = state.session.project_revision();
+    const std::uint64_t runtime_revision_before = state.session.runtime_revision();
+    const std::uint64_t preview_revision_before = state.session.preview_revision();
+    const std::size_t operations_before =
+        marrow::editor::agent_operation_descriptor_count();
+    // Only some session setters are change-gated, so the preview state itself
+    // is captured too. The unconditional bumpers -- select_animation,
+    // select_setup_pose, seek, advance, set_queue -- are caught by the revision
+    // comparison alone. Of the change-gated ones, set_playing, set_loop, and
+    // set_reverse write exactly the fields this PreviewState capture compares,
+    // and clear_queue is provably a no-op from the settled pre-capture state,
+    // so every observable stray session call is caught. Note the gate
+    // short-circuits at the revision comparison, so in practice that is the
+    // witness that reports.
+    const marrow::editor::PreviewState preview_before = state.session.preview_state();
+
+    // Replay every accepted and every rejected request, with no advance
+    // anywhere between the capture and the compare.
+    for (const ClampCase& item : clamp_cases) {
+        (void)set_speed(item.input);
+    }
+    for (const double preset : kPreviewSpeedPresets) {
+        (void)set_speed(preset);
+    }
+    (void)set_speed(std::numeric_limits<double>::quiet_NaN());
+    (void)set_speed(std::numeric_limits<double>::infinity());
+    (void)set_speed(-std::numeric_limits<double>::infinity());
+    // With the status message on, which is the only other field the setter may
+    // write. A visible message here keeps the gate below from being vacuous.
+    state.status_message.clear();
+    if (!set_preview_playback_speed(&state, 2.0, "Timeline", true) ||
+        state.status_message.find("2.00x") == std::string::npos ||
+        state.status_message.find("Timeline") == std::string::npos) {
+        std::cerr << "The setter must report the accepted speed and its source, got '"
+                  << state.status_message << "'.\n";
+        return false;
+    }
+
+    // preview_revision is the sharp one: the setter must make zero session
+    // calls, so even the cheapest preview counter must not move.
+    if (marrow::editor::serialize_project(*state.session.project()) != project_before ||
+        state.session.undo_count() != undo_before ||
+        state.session.redo_count() != redo_before ||
+        state.session.project_revision() != project_revision_before ||
+        state.session.runtime_revision() != runtime_revision_before ||
+        state.session.preview_revision() != preview_revision_before ||
+        marrow::editor::agent_operation_descriptor_count() != operations_before) {
+        std::cerr << "A preview speed change must leave the serialized project, the "
+                     "history, every session revision, and the operation registry "
+                     "untouched.\n";
+        return false;
+    }
+    update_project_dirty_state(&state);
+    if (state.project_dirty || state.session.dirty()) {
+        std::cerr << "A preview speed change must never dirty the project.\n";
+        return false;
+    }
+    const marrow::editor::PreviewState& preview_after = state.session.preview_state();
+    if (preview_after.playing != preview_before.playing ||
+        preview_after.loop != preview_before.loop ||
+        preview_after.reverse != preview_before.reverse ||
+        preview_after.time_seconds != preview_before.time_seconds ||
+        preview_after.animation_name != preview_before.animation_name) {
+        std::cerr << "A preview speed change must make zero EditorSession calls, so "
+                     "the session's own preview state cannot move.\n";
+        return false;
+    }
+
+    std::filesystem::path skeleton_after;
+    std::filesystem::path binary_after;
+    if (!export_pair("mar174-after", &skeleton_after, &binary_after)) {
+        std::cerr << "Preview speed smoke could not export its comparison assets.\n";
+        return false;
+    }
+    if (file_bytes(skeleton_after) != skeleton_bytes_before ||
+        file_bytes(binary_after) != binary_bytes_before) {
+        std::cerr << "A preview speed change altered the exported .mskl/.mbin bytes.\n";
+        return false;
+    }
+
+    // --- A speed change is inert inside a live transaction ------------------
+    {
+        const std::size_t transaction_undo_before = state.session.undo_count();
+        auto transaction = state.session.begin_edit({
+            marrow::editor::EditKind::EditProperty,
+            "Preview speed inertness probe",
+            "timeline:preview-speed",
+            false,
+            marrow::editor::EditImpact::Project |
+                marrow::editor::EditImpact::Runtime |
+                marrow::editor::EditImpact::Preview});
+        if (!transaction) {
+            std::cerr << "Preview speed smoke could not open its inertness transaction.\n";
+            return false;
+        }
+        sync_shell_from_editor_session(&state);
+        const double transaction_time_before = state.timeline_time_seconds;
+        state.timeline_playing = true;
+        if (!set_speed(4.0) || state.preview_speed != 4.0 ||
+            state.session.undo_count() != transaction_undo_before || !transaction) {
+            std::cerr << "A mid-transaction speed change must assign without recording "
+                         "history or disturbing the live transaction.\n";
+            return false;
+        }
+        advance_timeline_playback(&state, 0.25);
+        if (state.timeline_time_seconds != transaction_time_before) {
+            std::cerr << "EditorSession::advance() must refuse while a transaction is "
+                         "live, at any speed.\n";
+            return false;
+        }
+        transaction.cancel();
+        sync_shell_from_editor_session(&state);
+        if (marrow::editor::serialize_project(*state.session.project()) != project_before ||
+            state.session.undo_count() != transaction_undo_before) {
+            std::cerr << "Rolling back the inertness transaction must restore the "
+                         "byte-identical project.\n";
+            return false;
+        }
+    }
+
+    // --- MAR-172 interaction: 8x never reaches the managed boundary key -----
+    {
+        const auto stored_spine = [&]() -> const marrow::editor::TransformTimelineEdit* {
+            return state.session.project()->find_transform_timeline_edit(
+                "idle", "spine", TransformChannel::Rotate);
+        };
+        if (!begin_animation_duration_gesture(&state, "idle") ||
+            !apply_animation_duration_gesture(&state, 1.5) ||
+            !finish_animation_duration_gesture(&state, true) ||
+            std::abs(idle_duration() - 1.5) > 1e-6) {
+            std::cerr << "Preview speed smoke could not author idle's explicit duration.\n";
+            return false;
+        }
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::EditProperty,
+                "Enable loop synchronization",
+                "timeline:loop-sync",
+                false,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview});
+            marrow::editor::TimelineLaneSelector lane;
+            lane.kind = marrow::editor::TimelineLaneKind::Transform;
+            lane.animation_name = "idle";
+            lane.bone_name = "spine";
+            lane.transform_channel = TransformChannel::Rotate;
+            const auto enabled = transaction
+                ? marrow::editor::set_timeline_loop_sync(
+                      transaction.project(),
+                      *state.session.runtime_data(),
+                      {lane},
+                      true)
+                : marrow::editor::TimelineLoopSyncResult{};
+            if (!transaction || !enabled || !enabled.changed ||
+                enabled.created_key_count != 1U || !transaction.commit()) {
+                std::cerr << "Preview speed smoke could not enable spine/rotate loop sync.\n";
+                return false;
+            }
+        }
+        sync_shell_from_editor_session(&state);
+
+        const auto* lane = stored_spine();
+        if (lane == nullptr || lane->keyframes.size() < 2U ||
+            lane->keyframes.back().time != 1.5 ||
+            lane->keyframes.back().angle != lane->keyframes.front().angle) {
+            std::cerr << "Preview speed smoke could not establish MAR-172's managed "
+                         "boundary key at 1.5s.\n";
+            return false;
+        }
+        const std::size_t boundary_key_count = lane->keyframes.size();
+        const double boundary_angle = lane->keyframes.back().angle;
+        const std::string boundary_project_before =
+            marrow::editor::serialize_project(*state.session.project());
+
+        state.timeline_loop = true;
+        state.timeline_playing = true;
+        state.preview_reverse = false;
+        if (!refresh_preview_pose(&state) || !seek(0.0) || !set_speed(8.0)) {
+            std::cerr << "Preview speed smoke could not arm its boundary walk.\n";
+            return false;
+        }
+        for (int step = 0; step < 8; ++step) {
+            advance_timeline_playback(&state, 0.25);  // 16s over 1.5s periods
+        }
+        const auto* lane_after = stored_spine();
+        if (lane_after == nullptr || lane_after->keyframes.size() != boundary_key_count ||
+            lane_after->keyframes.back().time != 1.5 ||
+            lane_after->keyframes.back().angle != boundary_angle ||
+            lane_after->keyframes.back().angle != lane_after->keyframes.front().angle ||
+            marrow::editor::serialize_project(*state.session.project()) !=
+                boundary_project_before) {
+            std::cerr << "Ten periods of 8x playback must not touch the project or "
+                         "MAR-172's managed boundary key.\n";
+            return false;
+        }
+    }
+
+    // --- Undo must never rewrite the speed ----------------------------------
+    // The tempting home for this field is marrow::editor::PreviewState, which
+    // already holds reverse, loop, and playing. It cannot live there:
+    // assign_history_snapshot() writes every PreviewState field back on undo,
+    // and sync_shell_from_editor_session() does the same after session.undo(),
+    // while history_snapshots_equal() ignores them all. A speed parked there
+    // would silently jump on Ctrl+Z with nothing reporting a change. This case
+    // fails the moment the field moves off ShellState.
+    {
+        if (state.session.undo_count() < 2U) {
+            std::cerr << "Preview speed smoke needs real history for its undo case.\n";
+            return false;
+        }
+        if (!set_speed(3.5) || state.preview_speed != 3.5) {
+            std::cerr << "Preview speed smoke could not arm its undo case.\n";
+            return false;
+        }
+        if (!undo_project_change(&state) || state.preview_speed != 3.5) {
+            std::cerr << "Undo must leave the transient preview speed exactly where "
+                         "the user put it, got " << state.preview_speed << ".\n";
+            return false;
+        }
+        if (!undo_project_change(&state) || state.preview_speed != 3.5) {
+            std::cerr << "A second undo must still leave the preview speed alone, got "
+                      << state.preview_speed << ".\n";
+            return false;
+        }
+        if (!redo_project_change(&state) || state.preview_speed != 3.5) {
+            std::cerr << "Redo must leave the transient preview speed alone, got "
+                      << state.preview_speed << ".\n";
+            return false;
+        }
+    }
+
+    // --- reload_project() resets through the one session default ------------
+    if (!set_speed(4.0) || state.preview_speed != 4.0) {
+        std::cerr << "Preview speed smoke could not arm its reload reset.\n";
+        return false;
+    }
+    if (!reload_project(&state) || state.preview_speed != kDefaultPreviewSpeed) {
+        std::cerr << "Reloading the current project must reset the preview speed, got "
+                  << state.preview_speed << ".\n";
+        return false;
+    }
+
+    marrow::editor::ProjectData reopened_project = *state.session.project();
+    reopened_project.source_path = isolation.path() / "mar174-reopen.marrow";
+    materialize_temp_project_runtime_assets(state, &reopened_project);
+    const auto saved = marrow::editor::save_project(
+        reopened_project, reopened_project.source_path);
+    if (!saved) {
+        std::cerr << saved.error->format() << '\n';
+        return false;
+    }
+    if (!set_speed(4.0) || state.preview_speed != 4.0) {
+        std::cerr << "Preview speed smoke could not arm its open reset.\n";
+        return false;
+    }
+    state.project_path = reopened_project.source_path;
+    if (!reload_project(&state) || state.preview_speed != kDefaultPreviewSpeed) {
+        std::cerr << "Opening a different project must reset the preview speed, got "
+                  << state.preview_speed << ".\n";
+        return false;
+    }
+
+    if (marrow::editor::agent_operation_descriptor_count() != operation_count_before) {
+        std::cerr << "Preview speed editing changed the Agent operation surface.\n";
+        return false;
+    }
+    return true;
+}
+
+
+namespace {
+
+/**
+ * @brief Writes a `.marrow` over `skin_inherit_constraints.mskl`. MAR-185.
+ *
+ * The shell smoke has NO marker gate -- each scenario in `shell_smoke.cpp`
+ * builds its own `ShellState` -- so unlike `marrow_project_smoke` it may point
+ * itself at a second fixture. `skin_inherit_constraints.mskl` is the only
+ * fixture carrying a base inherit timeline: `toggle_inherit`/`child`, keys
+ * 0.0 normal, 0.25 noRotationOrReflection, 0.5 onlyTranslation, 1.0 normal,
+ * with every bone's setup `inherit` absent (i.e. `Normal`).
+ */
+std::string_view inherit_mode_token(marrow::runtime::BoneInherit mode) {
+    switch (mode) {
+    case marrow::runtime::BoneInherit::Normal: return "normal";
+    case marrow::runtime::BoneInherit::OnlyTranslation: return "onlyTranslation";
+    case marrow::runtime::BoneInherit::NoRotationOrReflection:
+        return "noRotationOrReflection";
+    case marrow::runtime::BoneInherit::NoScale: return "noScale";
+    case marrow::runtime::BoneInherit::NoScaleOrReflection:
+        return "noScaleOrReflection";
+    }
+    return "<unknown>";
+}
+
+bool write_inherit_fixture_project(const std::filesystem::path& project_path) {
+    marrow::editor::MinimalProjectOptions options;
+    options.project_path = project_path;
+    options.skeleton_path =
+        std::filesystem::absolute("assets/fixtures/skin_inherit_constraints.mskl");
+    options.atlas_paths = {
+        std::filesystem::absolute("assets/fixtures/player_idle.matl")};
+    options.name = "mar185_inherit";
+    options.active_animation = "toggle_inherit";
+    const marrow::editor::ProjectData project =
+        marrow::editor::create_minimal_project(options);
+    const auto saved = marrow::editor::save_project(project, project_path);
+    if (!saved) {
+        std::cerr << "MAR-185 shell smoke could not write " << project_path << ": "
+                  << saved.error->message << '\n';
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool validate_inherit_editing_shell_smoke(
+    const std::filesystem::path& project_path) {
+    using marrow::runtime::BoneInherit;
+    const ScopedPreferenceIsolation isolation("inherit-editing");
+    if (!isolation.installed()) {
+        std::cerr << "MAR-185 shell smoke could not isolate MARROW_CONFIG_HOME.\n";
+        return false;
+    }
+    const std::size_t operation_count_before =
+        marrow::editor::agent_operation_descriptor_count();
+    if (operation_count_before != 66U) {
+        std::cerr << "MAR-185 shell smoke requires the exact 66-operation registry.\n";
+        return false;
+    }
+
+    const std::filesystem::path scratch =
+        project_path.parent_path() / "mar185_inherit_shell.marrow";
+    if (!write_inherit_fixture_project(scratch)) {
+        return false;
+    }
+
+    ShellState state;
+    state.project_path = scratch;
+    if (!reload_project(&state) || state.load_result.skeleton_data == nullptr) {
+        std::cerr << "MAR-185 shell smoke could not load " << scratch << ".\n";
+        return false;
+    }
+    if (!set_selected_animation(
+            &state, "toggle_inherit", "MAR-185 shell smoke", false, true)) {
+        std::cerr << "MAR-185 shell smoke could not select 'toggle_inherit'.\n";
+        return false;
+    }
+    state.session.clear_history();
+
+    const auto tracks = [&] {
+        const auto* animation =
+            state.session.runtime_data()->find_animation("toggle_inherit");
+        return animation != nullptr
+            ? build_timeline_tracks(*state.load_result.skeleton_data, *animation)
+            : std::vector<TimelineTrackRow>{};
+    };
+    const auto inherit_row = [&](const std::vector<TimelineTrackRow>& rows)
+        -> const TimelineTrackRow* {
+        const auto bone_index =
+            state.load_result.skeleton_data->find_bone_index("child");
+        if (!bone_index.has_value()) return nullptr;
+        for (const auto& row : rows) {
+            if (row.kind == marrow::editor::timeline_model::TimelineTrackKind::Inherit &&
+                row.bone_index == bone_index) {
+                return &row;
+            }
+        }
+        return nullptr;
+    };
+    const auto stored_keys = [&]() -> std::vector<marrow::editor::InheritKeyframeEdit> {
+        const auto* edit = state.load_result.project->find_bone_inherit_timeline_edit(
+            "toggle_inherit", "child");
+        return edit != nullptr ? edit->keyframes
+                               : std::vector<marrow::editor::InheritKeyframeEdit>{};
+    };
+    const auto mode_at = [&](double time) -> std::optional<BoneInherit> {
+        for (const auto& key : stored_keys()) {
+            if (std::abs(key.time - time) <= 1e-6) return key.inherit;
+        }
+        return std::nullopt;
+    };
+
+    // --- S1: Add at 0.75 s seeds the SAMPLED mode, not the setup pose. -----
+    //
+    // 0.75 sits between the fixture's `0.5 onlyTranslation` and `1.0 normal`,
+    // and a stepped lane holds the earlier key's value, so the sample is
+    // OnlyTranslation. Every bone of this fixture is setup-`Normal`, so a
+    // sampler that read the setup pose would produce a two-value difference --
+    // and adding a key would silently CHANGE the pose at that instant.
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) {
+            std::cerr << "MAR-185 S1: no bone:*:Inherit row for 'child'.\n";
+            return false;
+        }
+        if (!scrub_timeline_time(&state, 0.75, "MAR-185 S1", false)) {
+            std::cerr << "MAR-185 S1: the playhead would not move to 0.75.\n";
+            return false;
+        }
+        const std::size_t undo_before = state.session.undo_count();
+        if (!add_timeline_key_at_playhead(&state, *row)) {
+            std::cerr << "MAR-185 S1: adding a key on " << row->id
+                      << " failed; status was \"" << state.status_message << "\".\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-185 S1: the add recorded "
+                      << (state.session.undo_count() - undo_before)
+                      << " history entries, expected 1.\n";
+            return false;
+        }
+        if (stored_keys().size() != 5U) {
+            std::cerr << "MAR-185 S1: the lane holds " << stored_keys().size()
+                      << " keys after the add, expected 5.\n";
+            return false;
+        }
+        const auto seeded = mode_at(0.75);
+        if (!seeded.has_value() || *seeded != BoneInherit::OnlyTranslation) {
+            std::cerr << "MAR-185 S1: the key added at 0.75 s carries mode \""
+                      << (seeded.has_value() ? inherit_mode_token(*seeded) : "<none>")
+                      << "\", expected the sampled \"onlyTranslation\".\n";
+            return false;
+        }
+    }
+
+    // --- S2: Add on an existing key REPLACES it in place. Add is Edit. -----
+    //
+    // Measured, and worth stating because it is not what the plan predicted: for
+    // a STEPPED lane the sampler returns the value of the very key the playhead
+    // is on, so an Add inside the 1 us identity window writes back exactly what
+    // is already stored. The lane must therefore not grow -- which is the whole
+    // "Add is Edit" claim -- and the session must record NO undo entry, because
+    // an edit that changes nothing is not an edit. The call reporting `false` is
+    // the shipped no-op-coalescing behaviour of every other family, not an
+    // inherit-specific failure.
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        if (!scrub_timeline_time(&state, 0.5, "MAR-185 S2", false)) return false;
+        const std::size_t count_before = stored_keys().size();
+        const std::size_t undo_before = state.session.undo_count();
+        const bool committed = add_timeline_key_at_playhead(&state, *row);
+        if (state.status_message == "The selected timeline is read-only") {
+            std::cerr << "MAR-185 S2: the add was refused as read-only.\n";
+            return false;
+        }
+        if (stored_keys().size() != count_before) {
+            std::cerr << "MAR-185 S2: the lane grew from " << count_before << " to "
+                      << stored_keys().size()
+                      << " keys; an add exactly on a key must REPLACE it, never "
+                         "insert a second key at the same time -- two inherit keys "
+                         "sharing a time are refused by both parsers on reload.\n";
+            return false;
+        }
+        if (committed || state.session.undo_count() != undo_before) {
+            std::cerr << "MAR-185 S2: re-adding the identical stepped value "
+                         "recorded a history entry.\n";
+            return false;
+        }
+        if (mode_at(0.5) != BoneInherit::OnlyTranslation) {
+            std::cerr << "MAR-185 S2: the replaced key no longer carries the "
+                         "sampled mode.\n";
+            return false;
+        }
+        const auto keys = stored_keys();
+        for (std::size_t index = 1U; index < keys.size(); ++index) {
+            if (!(keys[index].time > keys[index - 1U].time)) {
+                std::cerr << "MAR-185 S2: the lane is no longer strictly "
+                             "increasing at index " << index << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // --- S3: copy two keys, move the playhead, paste. ----------------------
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        const auto index_of = [&](double time) -> std::optional<std::size_t> {
+            for (std::size_t index = 0U; index < row->key_times.size(); ++index) {
+                if (std::abs(row->key_times[index] - time) <= 1e-6) return index;
+            }
+            return std::nullopt;
+        };
+        const auto low = index_of(0.25);
+        const auto high = index_of(0.5);
+        if (!low.has_value() || !high.has_value()) {
+            std::cerr << "MAR-185 S3: the lane lost its 0.25/0.5 keys.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*row, *low), timeline_key_ref(*row, *high)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+        if (!copy_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S3: copying two inherit keys failed.\n";
+            return false;
+        }
+        if (state.timeline_editor.clipboard.project_fragment
+                .bone_inherit_timeline_edits.empty()) {
+            std::cerr << "MAR-185 S3: the clipboard fragment carries no inherit "
+                         "lane, so the copy walked past the family.\n";
+            return false;
+        }
+        if (!scrub_timeline_time(&state, 0.6, "MAR-185 S3", false)) return false;
+        const std::size_t undo_before = state.session.undo_count();
+        const auto rows_before_paste = tracks();
+        if (!paste_timeline_clipboard(&state, rows_before_paste)) {
+            std::cerr << "MAR-185 S3: pasting the inherit keys failed.\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before + 1U) {
+            std::cerr << "MAR-185 S3: the paste recorded "
+                      << (state.session.undo_count() - undo_before)
+                      << " history entries, expected 1.\n";
+            return false;
+        }
+        if (!mode_at(0.6).has_value() || !mode_at(0.85).has_value()) {
+            std::cerr << "MAR-185 S3: the pasted pair did not land at 0.6 and "
+                         "0.85.\n";
+            return false;
+        }
+        const auto keys = stored_keys();
+        for (std::size_t index = 1U; index < keys.size(); ++index) {
+            if (!(keys[index].time > keys[index - 1U].time)) {
+                std::cerr << "MAR-185 S3: the pasted lane is not strictly "
+                             "increasing at index " << index << ".\n";
+                return false;
+            }
+        }
+    }
+
+    // --- S4: exact-playhead Remove, and the 5 ms miss. ---------------------
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (!scrub_timeline_time(&state, 0.85, "MAR-185 S4", false)) return false;
+        if (!remove_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S4: the exact-playhead removal failed; status "
+                         "was \"" << state.status_message << "\".\n";
+            return false;
+        }
+        if (mode_at(0.85).has_value()) {
+            std::cerr << "MAR-185 S4: the key at 0.85 survived its removal.\n";
+            return false;
+        }
+        const auto rows_after = tracks();
+        const TimelineTrackRow* row_after = inherit_row(rows_after);
+        if (row_after == nullptr) return false;
+        const std::size_t count_before = stored_keys().size();
+        if (!scrub_timeline_time(&state, 0.605, "MAR-185 S4", false)) return false;
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (remove_selected_timeline_keys(&state, rows_after)) {
+            std::cerr << "MAR-185 S4: a removal 5 ms off the nearest key "
+                         "succeeded; the playhead must match exactly.\n";
+            return false;
+        }
+        if (state.status_message != "No authored key exists at the playhead") {
+            std::cerr << "MAR-185 S4: the missed removal said \""
+                      << state.status_message
+                      << "\", expected \"No authored key exists at the "
+                         "playhead\".\n";
+            return false;
+        }
+        if (stored_keys().size() != count_before) {
+            std::cerr << "MAR-185 S4: the missed removal still changed the lane.\n";
+            return false;
+        }
+    }
+
+    // --- S5: a cancelled retime gesture changes NOTHING. AC3. --------------
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        const auto index_of_first = [&]() -> std::optional<std::size_t> {
+            for (std::size_t index = 0U; index < row->key_times.size(); ++index) {
+                if (std::abs(row->key_times[index] - 0.25) <= 1e-6) return index;
+            }
+            return std::nullopt;
+        }();
+        if (!index_of_first.has_value()) {
+            std::cerr << "MAR-185 S5: the lane lost its 0.25 key.\n";
+            return false;
+        }
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*row, *index_of_first)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+
+        const std::string project_before =
+            marrow::editor::serialize_project(*state.load_result.project);
+        const std::string animation_before = state.selected_animation_name;
+        const auto selection_before = state.timeline_editor.selected_keys;
+        const auto active_before = state.timeline_editor.active_key;
+        const std::size_t undo_before = state.session.undo_count();
+
+        if (!begin_timeline_retime_gesture(&state, 0x185u, 0.0f, rows)) {
+            std::cerr << "MAR-185 S5: the retime gesture would not open on an "
+                         "inherit key.\n";
+            return false;
+        }
+        if (!apply_timeline_retime_delta(&state, rows, 0.05, false)) {
+            std::cerr << "MAR-185 S5: the retime delta would not apply.\n";
+            return false;
+        }
+        finish_timeline_retime_gesture(&state, false);
+
+        if (marrow::editor::serialize_project(*state.load_result.project) !=
+            project_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime left the project "
+                         "changed.\n";
+            return false;
+        }
+        if (state.selected_animation_name != animation_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the preview "
+                         "animation to \"" << state.selected_animation_name
+                      << "\".\n";
+            return false;
+        }
+        if (state.timeline_editor.selected_keys != selection_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the key "
+                         "selection (" << selection_before.size() << " -> "
+                      << state.timeline_editor.selected_keys.size() << " keys).\n";
+            return false;
+        }
+        if (state.timeline_editor.active_key.has_value() !=
+                active_before.has_value() ||
+            (active_before.has_value() &&
+             !(*state.timeline_editor.active_key == *active_before))) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the active "
+                         "key.\n";
+            return false;
+        }
+        if (state.session.undo_count() != undo_before) {
+            std::cerr << "MAR-185 S5: the cancelled retime changed the history "
+                         "depth (" << undo_before << " -> "
+                      << state.session.undo_count() << ").\n";
+            return false;
+        }
+    }
+
+    // --- S7: a single-lane paste REMAPS onto the selected row. -------------
+    //
+    // `paste_timeline_clipboard`'s remap branch is reachable only when
+    // `clipboard_track_count` returns exactly 1, and that function is a
+    // fixed-length N-term sum over the fragment's family vectors -- an
+    // enumeration site the compiler says nothing about. With inherit missing
+    // from the sum a one-lane inherit clipboard counts as **zero** tracks,
+    // `selected_remap_track` stays null, and the inherit paste loop's remap
+    // branch is dead code: the keys land back on the bone they were copied
+    // from, silently, whatever row is selected.
+    {
+        // A second Inherit row to remap ONTO. The fixture ships exactly one
+        // inherit timeline (`child`), so without this there is no other row.
+        {
+            auto transaction = state.session.begin_edit({
+                marrow::editor::EditKind::AddKeyframe,
+                "Seed a second inherit lane",
+                "mar185:s7",
+                false,
+                marrow::editor::EditImpact::Project |
+                    marrow::editor::EditImpact::Runtime |
+                    marrow::editor::EditImpact::Preview});
+            if (!transaction) {
+                std::cerr << "MAR-185 S7: could not open a transaction.\n";
+                return false;
+            }
+            marrow::editor::InheritTimelineMergeRequest request;
+            request.animation_name = "toggle_inherit";
+            request.bone_name = "controller";
+            request.keys = {{0.0, "noScale"}, {0.4, "normal"}};
+            const auto merged = marrow::editor::merge_inherit_timeline(
+                transaction.project(), *state.session.runtime_data(), request);
+            if (!merged || !merged.changed || !transaction.commit()) {
+                std::cerr << "MAR-185 S7: seeding the controller lane failed: "
+                          << merged.error << '\n';
+                return false;
+            }
+            sync_shell_from_editor_session(&state);
+        }
+
+        const auto rows = tracks();
+        const auto find_inherit_row = [&](std::string_view bone,
+                                          const std::vector<TimelineTrackRow>& in)
+            -> const TimelineTrackRow* {
+            const auto index = state.load_result.skeleton_data->find_bone_index(bone);
+            if (!index.has_value()) return nullptr;
+            for (const auto& row : in) {
+                if (row.kind == marrow::editor::timeline_model::TimelineTrackKind::Inherit &&
+                    row.bone_index == index) {
+                    return &row;
+                }
+            }
+            return nullptr;
+        };
+        const TimelineTrackRow* source_row = find_inherit_row("child", rows);
+        const TimelineTrackRow* destination_row = find_inherit_row("controller", rows);
+        if (source_row == nullptr || destination_row == nullptr) {
+            std::cerr << "MAR-185 S7: needs both a 'child' and a 'controller' "
+                         "Inherit row.\n";
+            return false;
+        }
+        const auto key_at = [&](std::string_view bone, double time) {
+            const auto* edit = state.load_result.project->find_bone_inherit_timeline_edit(
+                "toggle_inherit", bone);
+            if (edit == nullptr) return false;
+            for (const auto& key : edit->keyframes) {
+                if (std::abs(key.time - time) <= 1e-6) return true;
+            }
+            return false;
+        };
+        const auto index_of = [&](const TimelineTrackRow& row, double time)
+            -> std::optional<std::size_t> {
+            for (std::size_t i = 0U; i < row.key_times.size(); ++i) {
+                if (std::abs(row.key_times[i] - time) <= 1e-6) return i;
+            }
+            return std::nullopt;
+        };
+        const auto source_key = index_of(*source_row, 0.25);
+        if (!source_key.has_value()) {
+            std::cerr << "MAR-185 S7: the 'child' lane lost its 0.25 key.\n";
+            return false;
+        }
+
+        // Copy ONE key from child -- one lane, so the remap arm is the one
+        // under test -- then select controller's row and paste.
+        state.selected_timeline_track_id = source_row->id;
+        state.timeline_editor.selected_keys = {
+            timeline_key_ref(*source_row, *source_key)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+        if (!copy_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S7: copying one inherit key failed.\n";
+            return false;
+        }
+        if (marrow::editor::timeline_model::clipboard_track_count(
+                state.timeline_editor.clipboard) != 1U) {
+            std::cerr << "MAR-185 S7: clipboard_track_count reports "
+                      << marrow::editor::timeline_model::clipboard_track_count(
+                             state.timeline_editor.clipboard)
+                      << " tracks for a one-lane inherit clipboard, expected 1. "
+                         "The remap branch is unreachable at any other value.\n";
+            return false;
+        }
+
+        const auto rows_before_paste = tracks();
+        const TimelineTrackRow* destination = find_inherit_row("controller", rows_before_paste);
+        if (destination == nullptr) return false;
+        state.selected_timeline_track_id = destination->id;
+        state.timeline_editor.selected_keys.clear();
+        state.timeline_editor.active_key.reset();
+        if (!scrub_timeline_time(&state, 0.9, "MAR-185 S7", false)) return false;
+        if (!paste_timeline_clipboard(&state, rows_before_paste)) {
+            std::cerr << "MAR-185 S7: the remapping paste failed.\n";
+            return false;
+        }
+        if (!key_at("controller", 0.9)) {
+            std::cerr << "MAR-185 S7: the paste did not land on the SELECTED "
+                         "'controller' row.\n";
+            return false;
+        }
+        if (key_at("child", 0.9)) {
+            std::cerr << "MAR-185 S7: the paste landed back on the source bone "
+                         "'child' instead of the selected 'controller' row -- the "
+                         "single-lane remap branch never ran.\n";
+            return false;
+        }
+
+        // The OTHER direction, and the nastier one. With inherit missing from
+        // the sum, a clipboard holding an inherit lane AND one other family
+        // counts as **one** track, so the `== 1U` gate -- whose whole purpose is
+        // to arm the remap only for a single-lane clipboard -- opens for a
+        // TWO-track clipboard and cross-remaps the other family onto whatever
+        // row is selected. Under-counting breaks inherit; it also mis-arms
+        // every other family.
+        {
+            // The fixture's `toggle_inherit` carries ONLY the one inherit lane,
+            // so the second family has to be authored before it can be copied.
+            {
+                auto transaction = state.session.begin_edit({
+                    marrow::editor::EditKind::AddKeyframe,
+                    "Seed a rotate lane",
+                    "mar185:s7b",
+                    false,
+                    marrow::editor::EditImpact::Project |
+                        marrow::editor::EditImpact::Runtime |
+                        marrow::editor::EditImpact::Preview});
+                if (!transaction) {
+                    std::cerr << "MAR-185 S7: could not open a transaction.\n";
+                    return false;
+                }
+                marrow::editor::TransformTimelineEdit rotate;
+                rotate.animation_name = "toggle_inherit";
+                rotate.bone_name = "root";
+                rotate.channel = marrow::editor::TransformTimelineChannel::Rotate;
+                rotate.keyframes.push_back({0.0, 0.0, 0.0, 0.0, {}, {}, {}});
+                rotate.keyframes.push_back({0.5, 30.0, 0.0, 0.0, {}, {}, {}});
+                transaction.project()->transform_timeline_edits.push_back(
+                    std::move(rotate));
+                if (!transaction.commit()) {
+                    std::cerr << "MAR-185 S7: seeding the rotate lane failed.\n";
+                    return false;
+                }
+                sync_shell_from_editor_session(&state);
+            }
+            const auto rows_two = tracks();
+            const TimelineTrackRow* inherit_source = find_inherit_row("child", rows_two);
+            const TimelineTrackRow* rotate_row = nullptr;
+            for (const auto& row : rows_two) {
+                if (row.transform_channel.has_value() && !row.key_times.empty()) {
+                    rotate_row = &row;
+                    break;
+                }
+            }
+            if (inherit_source == nullptr || rotate_row == nullptr) {
+                std::cerr << "MAR-185 S7: needs an inherit row and one transform "
+                             "row to build a two-track clipboard.\n";
+                return false;
+            }
+            state.selected_timeline_track_id = inherit_source->id;
+            state.timeline_editor.selected_keys = {
+                timeline_key_ref(*inherit_source, 0U), timeline_key_ref(*rotate_row, 0U)};
+            state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+            if (!copy_selected_timeline_keys(&state, rows_two)) {
+                std::cerr << "MAR-185 S7: the two-track copy failed.\n";
+                return false;
+            }
+            const std::size_t two_track_count =
+                marrow::editor::timeline_model::clipboard_track_count(
+                    state.timeline_editor.clipboard);
+            if (two_track_count != 2U) {
+                std::cerr << "MAR-185 S7: a clipboard holding one inherit lane and "
+                             "one transform lane counts as " << two_track_count
+                          << " tracks, expected 2. At 1 the single-lane remap gate "
+                             "opens for a TWO-track clipboard and cross-remaps the "
+                             "other family onto the selected row.\n";
+                return false;
+            }
+        }
+
+    }
+
+    // --- S6: a GUI rename carries the clipboard with it. -------------------
+    //
+    // The second detector for the cascade; `marrow_timeline_model_tests`' U3 is
+    // the first and runs earlier in the verification order.
+    {
+        const auto rows = tracks();
+        const TimelineTrackRow* row = inherit_row(rows);
+        if (row == nullptr) return false;
+        state.selected_timeline_track_id = row->id;
+        state.timeline_editor.selected_keys = {timeline_key_ref(*row, 0U)};
+        state.timeline_editor.active_key = state.timeline_editor.selected_keys.front();
+        if (!copy_selected_timeline_keys(&state, rows)) {
+            std::cerr << "MAR-185 S6: the copy failed.\n";
+            return false;
+        }
+        if (!apply_animation_catalog_action(
+                &state, AnimationCatalogAction::Rename, "toggle_inherit",
+                "toggle_two")) {
+            std::cerr << "MAR-185 S6: the rename failed: " << state.error_message
+                      << '\n';
+            return false;
+        }
+        if (state.timeline_editor.clipboard.animation_name != "toggle_two") {
+            std::cerr << "MAR-185 S6: clipboard.animation_name is \""
+                      << state.timeline_editor.clipboard.animation_name
+                      << "\" after the rename, expected \"toggle_two\".\n";
+            return false;
+        }
+        if (!marrow::editor::timeline_model::clipboard_time_shift(
+                 state.timeline_editor.clipboard, "toggle_two",
+                 state.timeline_time_seconds)
+                 .has_value()) {
+            std::cerr << "MAR-185 S6: Paste is still disabled after the rename.\n";
+            return false;
+        }
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove(scratch, ignored);
+    std::cout << "MAR-185 S1-S7: an inherit lane adds a SAMPLED key at the "
+                 "playhead, replaces one in place, copies and pastes as a typed "
+                 "fragment, removes only on an exact playhead match, survives a "
+                 "cancelled retime bit-identically, remaps a single-lane paste "
+                 "onto the SELECTED row rather than the source bone, and follows "
+                 "a GUI animation rename through the clipboard.\n";
     return true;
 }
 

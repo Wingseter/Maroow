@@ -580,20 +580,6 @@ void Skeleton::capture_display_state(DisplayStateSnapshot* snapshot) const {
     snapshot->attachment_playback_time = attachment_playback_time_;
 }
 
-void Skeleton::apply_display_state(const DisplayStateSnapshot& snapshot) {
-    bone_poses_ = snapshot.bone_poses;
-    bone_world_a_ = snapshot.bone_world_a;
-    bone_world_b_ = snapshot.bone_world_b;
-    bone_world_c_ = snapshot.bone_world_c;
-    bone_world_d_ = snapshot.bone_world_d;
-    bone_world_x_ = snapshot.bone_world_x;
-    bone_world_y_ = snapshot.bone_world_y;
-    slot_states_ = snapshot.slot_states;
-    mesh_deform_states_ = snapshot.mesh_deform_states;
-    draw_order_ = snapshot.draw_order;
-    attachment_playback_time_ = std::max(0.0, snapshot.attachment_playback_time);
-}
-
 void Skeleton::apply_interpolated_display_state(double alpha) {
     if (!update_throttle_state_.has_prediction) {
         return;

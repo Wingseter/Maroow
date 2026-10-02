@@ -500,12 +500,30 @@ add_library(marrow_editor STATIC
     src/editor/module.cpp
     src/editor/selection.cpp
     src/editor/preferences.cpp
+    src/editor/recent_projects.cpp
+    src/editor/atomic_file_write.cpp
     src/editor/atlas_packer.cpp
     src/editor/psd_import.cpp
     src/editor/project.cpp
+    src/editor/project_io.cpp
+    src/editor/project_parse.cpp
+    src/editor/project_runtime.cpp
+    src/editor/project_overlay.cpp
+    src/editor/project_serialize.cpp
+    src/editor/project_validation.cpp
+    src/editor/project_json.cpp
+    src/editor/psd_reimport_plan.cpp
+    src/editor/psd_reimport_commit.cpp
+    src/editor/psd_reimport_review.cpp
     src/editor/parameter_project_model.cpp
     src/editor/authoring.cpp
+    src/editor/mesh_weight_model.cpp
+    src/editor/diagnostics.cpp
+    src/editor/problems_model.cpp
+    src/editor/safe_fix.cpp
+    src/editor/curve_auto.cpp
     src/editor/session.cpp
+    src/editor/constraint_catalog.cpp
     src/editor/agent_dispatch.cpp
     src/editor/agent_handlers_inspection.cpp
     src/editor/agent_handlers_editing.cpp
@@ -637,6 +655,20 @@ target_include_directories(marrow_timeline_model_tests
 )
 
 target_link_libraries(marrow_timeline_model_tests
+    PRIVATE
+        marrow_editor
+)
+
+add_executable(marrow_mesh_weight_model_tests
+    src/tests/mesh_weight_model_tests.cpp
+)
+
+target_include_directories(marrow_mesh_weight_model_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
+target_link_libraries(marrow_mesh_weight_model_tests
     PRIVATE
         marrow_editor
 )
@@ -793,6 +825,11 @@ add_executable(marrow_project_smoke
     src/samples/editor_project_smoke.cpp
 )
 
+target_include_directories(marrow_project_smoke
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
 target_link_libraries(marrow_project_smoke
     PRIVATE
         marrow_editor
@@ -826,6 +863,11 @@ add_executable(marrow_psd_import_smoke
     src/samples/psd_import_smoke.cpp
 )
 
+target_include_directories(marrow_psd_import_smoke
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+)
+
 target_link_libraries(marrow_psd_import_smoke
     PRIVATE
         marrow_editor
@@ -849,9 +891,13 @@ add_dependencies(marrow_renderer_link_boundary_tests
     marrow_benchmark
 )
 
-add_executable(marrow_editor_shell
-    src/editor/shell_main.cpp
+add_library(marrow_editor_shell_core STATIC
+    src/editor/shell_frame.cpp
     src/editor/shell_core.cpp
+    src/editor/shell_gesture_lifecycle.cpp
+    src/editor/shell_file_paths.cpp
+    src/editor/shell_preferences.cpp
+    src/editor/shell_recent_projects.cpp
     src/editor/shell_preview.cpp
     src/editor/shell_asset_watch.cpp
     src/editor/shell_derived_cache.cpp
@@ -865,18 +911,12 @@ add_executable(marrow_editor_shell
     src/editor/viewport_interaction_controller.cpp
     src/editor/viewport_ffd_controller.cpp
     src/editor/shell_viewport_ui.cpp
+    src/editor/shell_problems.cpp
+    src/editor/shell_psd_reimport.cpp
     src/editor/shell_project_panels.cpp
     src/editor/shell_parameters.cpp
     src/editor/shell_agent_panel.cpp
     src/editor/shell_viewport.cpp
-    src/editor/shell_smoke.cpp
-    src/editor/shell_smoke_project.cpp
-    src/editor/shell_smoke_viewport.cpp
-    src/editor/shell_smoke_ffd.cpp
-    src/editor/shell_smoke_graph.cpp
-    src/editor/shell_smoke_timeline.cpp
-    src/editor/shell_smoke_frames.cpp
-    src/editor/shell_smoke_parameters.cpp
     src/editor/shell_widgets.cpp
     src/editor/icon_registry.cpp
     src/editor/viewport_renderer.cpp
@@ -885,14 +925,24 @@ add_executable(marrow_editor_shell
     src/editor/sokol_graphics_device.cpp
 )
 
-target_include_directories(marrow_editor_shell
-    PRIVATE
+# Preserve the historical guard name, now checking shared delegation. A build
+# dependency (not just POST_BUILD) also guards incremental/no-op host builds.
+add_custom_target(marrow_frame_body_check
+    COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/CheckFrameBodies.cmake
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Checking shared shell frame wiring"
+    VERBATIM
+)
+add_dependencies(marrow_editor_shell_core marrow_frame_body_check)
+
+target_include_directories(marrow_editor_shell_core
+    PUBLIC
         ${PROJECT_SOURCE_DIR}/external
         ${PROJECT_SOURCE_DIR}/src/renderer/generated
 )
 
-target_link_libraries(marrow_editor_shell
-    PRIVATE
+target_link_libraries(marrow_editor_shell_core
+    PUBLIC
         marrow_editor
         marrow_renderer_core
         marrow_timeline_model
@@ -902,21 +952,55 @@ target_link_libraries(marrow_editor_shell
 )
 
 if(WIN32)
-    target_link_libraries(marrow_editor_shell PRIVATE ws2_32)
+    target_link_libraries(marrow_editor_shell_core PUBLIC ws2_32)
 endif()
 
 if(APPLE)
-    target_sources(marrow_editor_shell PRIVATE
+    target_sources(marrow_editor_shell_core PRIVATE
         src/editor/macos_app_focus.mm
     )
 endif()
 
-add_custom_command(TARGET marrow_editor_shell POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_SOURCE_DIR}/assets/fonts
-        $<TARGET_FILE_DIR:marrow_editor_shell>/fonts
-    COMMENT "Copying editor fonts to build directory"
-)
+add_executable(marrow_editor_shell src/editor/shell_main.cpp)
+target_link_libraries(marrow_editor_shell PRIVATE marrow_editor_shell_core)
+set(MARROW_SHELL_HOST_TARGETS marrow_editor_shell)
+
+if(BUILD_TESTING)
+    add_executable(marrow_editor_shell_smoke
+        src/editor/shell_main.cpp
+        src/editor/shell_smoke.cpp
+        src/editor/shell_smoke_project.cpp
+        src/editor/shell_smoke_psd.cpp
+        src/editor/shell_smoke_viewport.cpp
+        src/editor/shell_smoke_ffd.cpp
+        src/editor/shell_smoke_graph.cpp
+        src/editor/shell_smoke_timeline.cpp
+        src/editor/shell_smoke_constraints.cpp
+        src/editor/shell_smoke_frames.cpp
+        src/editor/shell_smoke_frame_contract.cpp
+        src/editor/shell_smoke_parameters.cpp
+    )
+    target_compile_definitions(marrow_editor_shell_smoke PRIVATE
+        MARROW_ENABLE_HEADLESS_SMOKE=1)
+    target_link_libraries(marrow_editor_shell_smoke PRIVATE marrow_editor_shell_core)
+    list(APPEND MARROW_SHELL_HOST_TARGETS marrow_editor_shell_smoke)
+
+    add_executable(marrow_shell_lifecycle_tests src/tests/shell_lifecycle_tests.cpp)
+    target_link_libraries(marrow_shell_lifecycle_tests PRIVATE marrow_editor_shell_core)
+    add_test(NAME marrow.shell_lifecycle COMMAND marrow_shell_lifecycle_tests)
+    set_tests_properties(marrow.shell_lifecycle PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;unit;noninteractive")
+endif()
+
+foreach(_shell_host IN LISTS MARROW_SHELL_HOST_TARGETS)
+    add_custom_command(TARGET ${_shell_host} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_SOURCE_DIR}/assets/fonts
+            $<TARGET_FILE_DIR:${_shell_host}>/fonts
+        COMMENT "Copying editor fonts to build directory"
+    )
+endforeach()
 
 file(GLOB MARROW_EDITOR_ICON_SOURCES
     "${CMAKE_CURRENT_BINARY_DIR}/icons/*.png")
@@ -937,7 +1021,9 @@ add_custom_command(
 
 add_custom_target(marrow_editor_icons ALL
     DEPENDS ${MARROW_EDITOR_ICON_STAMP})
-add_dependencies(marrow_editor_shell marrow_editor_icons)
+foreach(_shell_host IN LISTS MARROW_SHELL_HOST_TARGETS)
+    add_dependencies(${_shell_host} marrow_editor_icons)
+endforeach()
 
 if(WIN32)
     set(MARROW_PORTABLE_ROOT
@@ -1058,9 +1144,9 @@ else()
 endif()
 
 if(APPLE)
-    target_compile_definitions(marrow_editor_shell PRIVATE SOKOL_METAL)
+    target_compile_definitions(marrow_editor_shell_core PUBLIC SOKOL_METAL)
 else()
-    target_compile_definitions(marrow_editor_shell PRIVATE SOKOL_GLCORE)
+    target_compile_definitions(marrow_editor_shell_core PUBLIC SOKOL_GLCORE)
 endif()
 
 if(BUILD_TESTING)
@@ -1184,6 +1270,15 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME marrow.mesh_weight_model
+        COMMAND marrow_mesh_weight_model_tests
+    )
+    set_tests_properties(marrow.mesh_weight_model PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;mesh;weights;unit;noninteractive"
+    )
+
+    add_test(
         NAME marrow.preference_store
         COMMAND marrow_preference_tests
     )
@@ -1246,8 +1341,21 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME marrow.shell_frame_contract
+        COMMAND ${CMAKE_COMMAND} -E env
+            MARROW_DISPLAY_SMOKE=0 MARROW_FRAME_CONTRACT_ONLY=1
+            $<TARGET_FILE:marrow_editor_shell_smoke>
+            --project assets/fixtures/player_idle.marrow --auto-close 1
+    )
+    set_tests_properties(marrow.shell_frame_contract PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;integration;noninteractive"
+        TIMEOUT 30
+    )
+
+    add_test(
         NAME marrow.parameter_editor_shell_smoke
-        COMMAND marrow_editor_shell
+        COMMAND marrow_editor_shell_smoke
             --project assets/fixtures/parameter_face_basic.marrow
             --auto-close 2
     )
@@ -1290,6 +1398,69 @@ if(BUILD_TESTING)
         LABELS "editor;agent;smoke;noninteractive"
     )
 
+    # Exercise the Python side of the same agent boundary without the MCP SDK
+    # or a live editor. A missing interpreter must not silently skip this gate.
+    find_package(Python3 3.9 REQUIRED COMPONENTS Interpreter)
+
+    add_executable(marrow_project_subsystem_tests
+        src/tests/project_subsystem_tests.cpp
+    )
+    target_include_directories(marrow_project_subsystem_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/editor
+    )
+    target_link_libraries(marrow_project_subsystem_tests PRIVATE marrow_editor)
+    add_test(NAME marrow.project_subsystem COMMAND marrow_project_subsystem_tests)
+    set_tests_properties(marrow.project_subsystem PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;project;unit;noninteractive"
+        TIMEOUT 30
+    )
+    add_test(NAME marrow.project_subsystem_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tools/tests/test_project_subsystem_boundary.py -v
+    )
+    set_tests_properties(marrow.project_subsystem_boundary PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;project;guardrail;unit;noninteractive"
+        TIMEOUT 30
+    )
+
+    add_test(
+        NAME marrow.shell_frame_boundary
+        COMMAND ${Python3_EXECUTABLE}
+                ${PROJECT_SOURCE_DIR}/tools/tests/test_shell_frame_boundary.py -v
+    )
+    set_tests_properties(marrow.shell_frame_boundary PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;shell;guardrail;unit;noninteractive"
+        TIMEOUT 30
+    )
+    add_test(
+        NAME marrow.mcp_transport
+        COMMAND ${Python3_EXECUTABLE} -W error::ResourceWarning
+                ${PROJECT_SOURCE_DIR}/tools/mcp/test_transport.py -v
+    )
+    set_tests_properties(marrow.mcp_transport PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;agent;socket;unit;noninteractive"
+        TIMEOUT 30
+    )
+
+    # MAR-189. Built since MAR-176 and never run by CTest, so MAR-188's whole
+    # planning suite and this story's commit suite were one manual invocation away
+    # from silence. The working directory is the source tree because the cases
+    # resolve `assets/fixtures/` from it -- and because the safety gate locates the
+    # repository root by walking up for that same fixture, so it can refuse to
+    # write into it.
+    add_test(
+        NAME marrow.psd_import_smoke
+        COMMAND marrow_psd_import_smoke
+    )
+    set_tests_properties(marrow.psd_import_smoke PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "editor;psd;smoke;noninteractive"
+    )
+
     add_test(
         NAME marrow.c_abi_smoke
         COMMAND marrow_c_smoke
@@ -1301,7 +1472,7 @@ if(BUILD_TESTING)
 
     add_test(
         NAME marrow.editor_shell_smoke
-        COMMAND marrow_editor_shell
+        COMMAND marrow_editor_shell_smoke
             --project
             assets/fixtures/player_idle.marrow
             --auto-close
@@ -1310,5 +1481,20 @@ if(BUILD_TESTING)
     set_tests_properties(marrow.editor_shell_smoke PROPERTIES
         WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
         LABELS "editor;shell;smoke;noninteractive"
+    )
+
+    # MAR-191. Documented registry totals must agree with the registry itself.
+    # The oracle is COMPUTED from `src/editor/agent_dispatch.cpp`; the gate carries
+    # no copy of the number, so it cannot go stale the way the claims it checks did.
+    # Registered here rather than left as a prose command line, because a gate
+    # nobody invokes rots until someone deletes it as dead code.
+    add_test(
+        NAME marrow.registry_claims
+        COMMAND python3 ${PROJECT_SOURCE_DIR}/tools/docs/check_registry_claims.py
+                ${PROJECT_SOURCE_DIR}
+    )
+    set_tests_properties(marrow.registry_claims PROPERTIES
+        WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+        LABELS "docs;noninteractive"
     )
 endif()

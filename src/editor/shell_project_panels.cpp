@@ -1,5 +1,7 @@
 #include "shell_project_panels.hpp"
 
+#include "shell_recent_projects.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -12,7 +14,10 @@
 #include "imgui_internal.h"
 
 #include "agent_socket.hpp"
+#include "timeline_controller.hpp"
 #include "shell_asset_watch.hpp"
+#include "shell_file_paths.hpp"
+#include "shell_psd_reimport.hpp"
 #include "shell_preview.hpp"
 #include "shell_selection.hpp"
 #include "shell_theme.hpp"
@@ -388,6 +393,24 @@ bool apply_animation_duration_gesture(ShellState* state, double duration) {
         return true;
     }
 
+    // MAR-171: a duration change moves no key time and no key value, so with
+    // consistent automatic curves this resolves nothing. The seam is wired
+    // anyway because criterion 3 names duration, because it costs one call, and
+    // because it is precisely where MAR-172's managed boundary key will live.
+    // The Agent's `animation.set_duration` calls the same resolver, so both
+    // surfaces agree.
+    std::string auto_curve_error;
+    if (!resolve_timeline_auto_curves(
+            gesture.transaction.project(), gesture.animation_name, &auto_curve_error)) {
+        AnimationDurationGesture cancelled = std::move(gesture);
+        state->animation_duration_gesture.reset();
+        cancelled.transaction.cancel();
+        sync_shell_from_editor_session(state);
+        state->error_message = auto_curve_error;
+        state->status_message = "Failed to update automatic curves: " + auto_curve_error;
+        return false;
+    }
+
     const marrow::editor::SessionResult refreshed = gesture.transaction.refresh_runtime();
     if (!refreshed) {
         const std::string error = refreshed.error.has_value()
@@ -582,6 +605,18 @@ bool apply_animation_catalog_action(
     }
 
     sync_shell_from_editor_session(state);
+    // MAR-185. The clipboard is the one piece of shell state a catalog edit
+    // never reached: `Clipboard::animation_name` gates every paste, so before
+    // this a copy followed by a rename of that animation silently greyed the
+    // Paste button out with no message, for ALL SEVEN key families at once.
+    // It is one field, so there is no inherit-only version of the fix.
+    if (action == AnimationCatalogAction::Rename) {
+        marrow::editor::timeline_model::cascade_animation_rename(
+            &state->timeline_editor.clipboard, source, destination);
+    } else if (action == AnimationCatalogAction::Delete) {
+        marrow::editor::timeline_model::cascade_animation_delete(
+            &state->timeline_editor.clipboard, source);
+    }
     if (state->selected_animation_name != previous_selection) {
         state->timeline_editor.selected_keys.clear();
         state->timeline_editor.active_key.reset();
@@ -596,7 +631,7 @@ bool apply_animation_catalog_action(
 // Secondary toolbar tier (below the menu bar): global actions on the left,
 // the ModeStrip centered, drawn as a viewport side bar so the dockspace
 // shrinks to fit beneath it.
-void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
+void draw_shell_toolbar(ShellState* state) {
     namespace t = marrow::editor::shell::theme;
     ImGuiViewport* vp = ImGui::GetMainViewport();
     const float h = ImGui::GetFrameHeight() + 8.0f;
@@ -622,7 +657,7 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
             }
             if (icon_button(state->icons, Icon::Reload, "Reload project",
                             false, !project_loaded || gesture_active)) {
-                *reload_requested = true;
+                begin_session_intent(state, SessionIntent::Reload);
             }
             ImGui::TextDisabled("|");
             if (icon_button(state->icons, Icon::Undo, "Undo (Ctrl+Z)", false,
@@ -679,12 +714,15 @@ void draw_shell_toolbar(bool* reload_requested, ShellState* state) {
     ImGui::PopStyleColor();
 }
 
-ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
+void draw_menu_bar(ShellState* state) {
     if (!ImGui::BeginMainMenuBar()) {
-        return ProjectMenuAction::None;
+        // The modals must still be drawn when the menu bar is clipped, or an
+        // open interaction would vanish for as long as it stays clipped. This is
+        // the SECOND of this function's two mutually exclusive calls to
+        // draw_file_path_modals -- exactly one of them runs per frame.
+        draw_file_path_modals(state);
+        return;
     }
-
-    ProjectMenuAction action = ProjectMenuAction::None;
 
     if (g_font_semibold) ImGui::PushFont(g_font_semibold);
     ImGui::TextColored(marrow::editor::shell::theme::kPrimary, "marrow");
@@ -692,15 +730,42 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
     ImGui::TextDisabled("·");
 
     if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem(
-                "Reload Project",
-                nullptr,
-                false,
-                !authoring_gesture_active(*state))) {
-            *reload_requested = true;
+        // Every item that can DISCARD unsaved work -- New, Open, Reload, Quit --
+        // goes through begin_session_intent, which is the only function that
+        // consults dirtiness. Save and Save As call begin_file_action directly:
+        // Save IS the resolution, so gating it would deadlock the machine.
+        const bool gesture_active = authoring_gesture_active(*state);
+        const bool project_loaded = state->load_result.project != nullptr;
+        if (ImGui::MenuItem("New Project...", nullptr, false, !gesture_active)) {
+            begin_session_intent(state, SessionIntent::New);
         }
+        if (ImGui::MenuItem("Open Project...", nullptr, false, !gesture_active)) {
+            begin_session_intent(state, SessionIntent::Open);
+        }
+        // MAR-183: a Recent entry is an Open like any other and enters the same
+        // gate -- draw_recent_projects_menu's items call open_recent_project,
+        // whose entire body is a begin_session_intent call.
+        draw_recent_projects_menu(state);
+        ImGui::Separator();
+        if (ImGui::MenuItem(
+                "Save", "Ctrl+S", false, !gesture_active && project_loaded)) {
+            begin_file_action(state, FileAction::Save);
+        }
+        if (ImGui::MenuItem(
+                "Save As...", nullptr, false, !gesture_active && project_loaded)) {
+            begin_file_action(state, FileAction::SaveAs);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reload Project", nullptr, false, !gesture_active)) {
+            begin_session_intent(state, SessionIntent::Reload);
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem("Quit")) {
-            action = ProjectMenuAction::QuitRequested;
+            // The gate lives HERE, not in the frame body. Quit's old handling
+            // sat in shell_main.cpp, whose hand-maintained twin discards the
+            // return value entirely, so any gate placed there was invisible to
+            // every test.
+            begin_session_intent(state, SessionIntent::Quit);
         }
         ImGui::EndMenu();
     }
@@ -878,11 +943,16 @@ ProjectMenuAction draw_menu_bar(bool* reload_requested, ShellState* state) {
 
     ImGui::EndMainMenuBar();
 
-    draw_shell_toolbar(reload_requested, state);
-    return action;
+    draw_shell_toolbar(state);
+    // Root scope: BeginViewportSideBar/End have already balanced. This and the
+    // clipped-menu-bar early return above are the function's only two calls, and
+    // they are mutually exclusive -- so the modals are drawn exactly once per
+    // frame, and BOTH frame bodies reach them through their existing
+    // draw_menu_bar call without any frame-body edit.
+    draw_file_path_modals(state);
 }
 
-void draw_project_window(bool* reload_requested, ShellState* state) {
+void draw_project_window(ShellState* state) {
     ImGui::Begin(kProjectWindowTitle);
     widgets::panel_head(state->icons, Icon::NodeAnim, "Project",
                         state->project_dirty ? "UNSAVED" : nullptr);
@@ -894,7 +964,7 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
             "Reload project",
             false,
             gesture_active)) {
-        *reload_requested = true;
+        begin_session_intent(state, SessionIntent::Reload);
     }
     ImGui::SameLine();
     if (icon_button(state->icons, Icon::Save, "Save project", false, gesture_active)) {
@@ -912,6 +982,45 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
 
     ImGui::SameLine();
     ImGui::Checkbox("Export .mbin", &state->export_binary_output);
+
+    // MAR-190. Shown only when the project remembers a PSD import: with no
+    // provenance there is nothing to diff a candidate against, and every layer
+    // would plan as `Added`. P1 witnesses that a provenance-free project draws
+    // no button at all.
+    if (state->session.has_project() &&
+        state->session.project()->editor_metadata.import_sources.has_value() &&
+        state->session.project()->editor_metadata.import_sources->psd.has_value()) {
+        ImGui::SameLine();
+        if (ImGui::Button("Reimport PSD...##psd_reimport_open")) {
+            const marrow::editor::ProjectData& project = *state->session.project();
+            const marrow::editor::PsdImportProvenance& stored =
+                *project.editor_metadata.import_sources->psd;
+            marrow::editor::PsdReimportPlanOptions options;
+            options.psd_path = project.resolve_path(stored.source_path);
+            // Per-process, at the point the directory is named. A `static`
+            // counter is unique within one process only, so two editors under a
+            // shared root both pick `plan-1` and the second is refused for a
+            // reason its user cannot act on.
+            options.staging_root = psd_reimport_staging_root();
+            // The TARGET's own names, so the staged atlas's `image` member still
+            // names the texture beside it after a byte copy. Left at the
+            // planner's defaults the commit is refused at `ValidateRequest`.
+            options.staged_skeleton_filename =
+                project.resolved_skeleton_path().filename().generic_string();
+            options.staged_atlas_filename =
+                project.resolved_atlas_paths().empty()
+                ? std::string()
+                : project.resolved_atlas_paths().front().filename().generic_string();
+            marrow::editor::PsdReimportPlan plan =
+                marrow::editor::plan_psd_reimport(project, options);
+            if (!plan) {
+                state->status_message = plan.error->format();
+            } else {
+                begin_psd_reimport_review(
+                    state, plan, options.staging_root, options.psd_path);
+            }
+        }
+    }
 
     // Project identity card (surface-card tonal lift, no border).
     {
@@ -1013,6 +1122,17 @@ void draw_project_window(bool* reload_requested, ShellState* state) {
     }
 
     ImGui::End();
+
+    // THE call site -- the only one in the tree outside the module that defines
+    // it. Drawn from inside `draw_project_window`, which BOTH frame bodies
+    // already call unconditionally, so no frame-body edit is needed and there is
+    // no duplicated list for a gate to keep in sync. `CheckFrameBodies.cmake`
+    // cannot see this function at all (its regex matches only `draw_*_window`),
+    // so Task 9's single-call-site grep is the structural guard instead.
+    //
+    // AFTER `ImGui::End()`, deliberately: a modal is a top-level window, and
+    // opening one while the Project window is still current would nest it.
+    draw_psd_reimport_modal(state);
 }
 
 void draw_runtime_window(const ShellState& state) {

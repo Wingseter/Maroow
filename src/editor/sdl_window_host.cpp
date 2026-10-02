@@ -106,7 +106,7 @@ public:
     }
 
     bool should_close() const noexcept override { return close_requested_; }
-    void request_close() noexcept override { close_requested_ = true; }
+    void cancel_close_request() noexcept override { close_requested_ = false; }
 
     sg_environment graphics_environment() const noexcept override {
         sg_environment environment{};

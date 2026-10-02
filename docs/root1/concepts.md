@@ -139,8 +139,126 @@ transient shell state. They are duration-independent and are not serialized or
 included in history, dirty state, runtime export, C ABI, or Agent/MCP. Runtime
 revision rebuilds the effective projection without retaining runtime pointers;
 same-context undo/redo preserves a finite view, while successful project/source
-adoption resets the graph state. MAR-167 performs no graph authoring; point
-time/value dragging begins at MAR-168.
+adoption resets the graph state. Graph authoring introduces no parallel
+key-writing path: a value drag writes through `offset_keyframe_scalars()` and a
+time drag through the dopesheet's `retime_keyframes()`, both inside one
+`EditorSession::EditTransaction`. Components the drag does not name, the key
+time, and the parent key's single shared outgoing easing are carried through
+unchanged, and explicit-duration auto-grow runs inside the same transaction and
+the same undo entry. The drag candidate itself holds no transaction, so a press
+never blocks another editing surface.
+
+MAR-169 adds easing authoring on the same foundation. The graph writes the
+outgoing easing through the additive `set_keyframe_interpolation()` primitive
+inside one `EditTransaction`, and that primitive deliberately takes **no**
+component argument: the easing is a property of the whole parent key, so a
+per-component curve is not merely disallowed but unrepresentable in `.marrow`,
+`.mskl`, `.mbin`, and the runtime alike. The pure pointer mapping clamps the
+Bezier x control points into `[0, 1]`, which is exactly the invariant both file
+loaders already enforce and exactly the condition that makes the runtime's
+`X(t) = alpha` inverse well posed; the primitive independently rejects any
+out-of-range or non-finite value atomically, testing finiteness before range so
+NaN cannot slip through. Finite y overshoot is preserved. The same mutation is
+exposed to the Agent registry and the Python MCP facade as
+`timeline.set_interpolation`, calling the identical primitive, which is what
+makes their behaviour structurally rather than coincidentally the same.
+
+MAR-170 adds six fixed curve presets on top of that primitive without adding an
+operation. Linear, Stepped, Ease `[0.25, 0.1, 0.25, 1]`, Ease-In
+`[0.42, 0, 1, 1]`, Ease-Out `[0, 0, 0.58, 1]`, and Ease-In-Out
+`[0.42, 0, 0.58, 1]` are source constants declared once in
+`include/marrow/editor/authoring.hpp`, and the GUI, the Agent, and the MCP
+facade all reach them through the same `set_keyframe_interpolation()` call, so
+`timeline.set_interpolation` simply gained four string tokens. Applying a preset
+writes every compatible key in the current timeline selection as one previewed
+transaction and one undo entry; the GUI skips easing-free lanes and reports the
+count while the Agent still rejects them, because a dopesheet box selection is
+built loosely and a scripted selector list is not. Every preset satisfies
+`cx2 >= cx1` and `0 <= cy1 <= cy2 <= 1`, so no preset can overshoot — overshoot
+remains reachable only through a manual handle drag. The "current preset"
+readout is a pure function of the four stored floats, compared bit-exactly in
+`float32` with no epsilon and no persisted marker, so it goes `Custom` the
+moment a handle drag moves away from a preset and survives undo, redo, and
+reload with nothing to invalidate. The remembered default curve that seeds newly
+authored Transform, Deform, and Slot Color keys lives in the user-local
+`editor-settings.json`, never in the project: it changes no existing data, and
+two animators may reasonably want different defaults. Every shell gesture that
+authors a key at a time with none takes it — the playhead button, a mesh vertex
+drag, a viewport gizmo drag, and the Inspector fields — but the shared
+`upsert_transform_keyframe()` and `upsert_deform_keyframe()` primitives never
+read a preference themselves. They take the seed as an argument that defaults to
+Linear, so the Agent's output stays reproducible on any machine and the
+preference module stays as isolated as MAR-156 left it. The seed initializes an
+inserted key; a gesture that lands on an existing key leaves its curve alone. Applying a preset does not
+change it; only the explicit `Default:` control does.
+
+MAR-171 adds the other half of the pair. A Transform or Slot Color key can
+record **curve mode** — project-local authoring intent, stored only in
+`.marrow` — saying whether its stored easing is a number the animator put there
+(`manual`) or a derived value the editor recomputes from the driver's
+neighbouring keys (`auto`). The runtime and both runtime formats only ever see
+the resolved easing: `curve_mode` and `curve_driver` never enter `.mskl` or
+`.mbin`, and a build that has never heard of them reads the file correctly.
+Resolution is eager and transactional — an automatic curve is recomputed inside
+the very transaction that moved its neighbours, so one edit remains one undo
+entry and a saved project never disagrees with its own export. The interpolant
+is monotone Fritsch–Carlson, whose normalization produces `cx1 = 1/3` and
+`cx2 = 2/3` identically rather than by clamping; the same algebra keeps `cy`
+inside `[0, 1]`, so an automatic curve can never overshoot and overshoot stays
+reachable only through a manual handle drag. Writing any absolute easing — a
+handle drag, a preset, the numeric inspector, or the Agent — demotes the key to
+manual, and the rule lives inside the one primitive that writes an absolute
+easing so no caller can forget it.
+
+MAR-172 gives a **lane** the same kind of project-local intent. A looping
+`TrackEntry` wraps `track_time` modulo `AnimationData::duration()`, which is the
+explicit duration when one is authored and the last-key time otherwise, and
+sampling a continuous timeline past its last key holds that key's value. So a
+clip whose duration is 1.5 s and whose `spine` rotate lane ends at 1.0 s holds
+that last pose for half a second and then snaps back to the pose at time zero —
+the pop every animator hand-fixes by copying the first key to the end of the clip
+and re-copying it every time the first key changes. A lane can now be opted in to
+**loop synchronization**, after which the editor guarantees, on every
+transaction, that the lane carries exactly one managed key at the explicit
+duration whose value and easing record are a bit-exact copy of that lane's key at
+time zero. The prerequisites are exactly an *explicit* duration and a key at time
+zero: with an inferred duration the boundary key would define the duration that
+defines the boundary key, a recursion with no fixed point, and without a key at
+time zero the boundary would mirror a key whose own time is arbitrary. The
+managed key's identity is derived — it *is* the key at the duration — so nothing
+can carry a stale marker through a copy, a paste, or a retime, and the flag
+itself is one `.marrow`-only boolean that never reaches a runtime file. The
+boundary key does reach it, as an ordinary keyframe, which is the whole point.
+
+MAR-173 adds the one timing edit that is not a translation. Every other timing
+operation moves keys by one shared delta; **scaling** moves each key by a delta
+proportional to its distance from a pivot, and that pivot is never a free
+parameter — it is always the *opposite edge of the selection's own time range*,
+named by an enum rather than passed as a time, so a caller cannot ask for
+something the operation does not mean. Every selected key lands at
+`pivot + (time - pivot) * scale` for one finite, strictly positive ratio, which
+makes the pivot key bit-identical by IEEE-754 rather than by tolerance and is
+what lets a live drag compose its ratio incrementally without drifting.
+**Scaling rejects where retiming clamps**, and the difference is not an
+oversight. A clamped translation still delivers a translation, just a shorter
+one; a clamped scale would have to either stop every key at the first collision,
+producing a ratio the user did not choose and cannot see, or move keys by
+different ratios, producing something that is not a scale at all. So a
+projected pair falling closer than its family's minimum separation — including a
+selected key intruding on an unselected neighbour — rejects the whole call and
+names the pair. The threshold is `min(spacing, original_gap)` rather than a flat
+millisecond, which says exactly what is meant: a gap that satisfied the spacing
+must still satisfy it, and a gap that was already tighter must not get tighter,
+so an imported timeline already carrying a sub-millisecond gap stays editable.
+The same principle turns MAR-172's loop pin into a rejection here: pinning one
+key while the rest scale would produce a shape that is not a scale for any
+ratio. Tied event keys move together as a consequence of the mapping being a
+function of time, not as a defensive loop, and a selection naming only part of a
+tie is rejected by name rather than silently widened. Rejection is per *call*,
+not per gesture: a drag that crosses a collision on its way somewhere legal
+holds its last accepted shape and explains why, because dragging a scale handle
+inward and back out again is ordinary and killing the drag there would lose the
+edit.
 
 Viewport snap settings are optional project metadata, not user preferences or
 runtime data. The controller reads them directly from the active
